@@ -97,6 +97,29 @@ zcode plugins install infinite-fantasy-origins@zcode-infinite-fantasy
 
 上游不识别插件清单里的 `systemPrompts` 字段，所以该插件只在本构建上生效。
 
+## 桌面窗口黑边修复（Windows）
+
+现象：ZCode 每次启动时，窗口顶部与右侧各出现一条黑色条带，主内容区正常。
+
+原因：桌面端主窗口在 `win32` 分支使用 `backgroundColor: "#00000000"`（8 位 alpha 全透明）
+配 `frame: false`。Windows 上没有 `transparent: true` 的窗口不做 alpha 合成，
+启动早期 renderer 还没画出自己的根背景，未绘制区域就被合成成黑色。
+
+修法两种，效果相同：
+
+1. **改源码后重新打包桌面端**：`packages/desktop/src/main/desktopWindowChrome.ts`
+   的 `win32` 分支把底色改成不透明 `#ffffffff`，由 renderer 的根背景接手续画
+   （深色主题同样由 renderer 覆盖）。
+2. **给已安装的 `app.asar` 打等效体检补丁**（不改包结构，原位置换等长字节）：
+
+```bash
+node tools/patch-desktop-window-background.mjs --check "C:/App/ZCode/resources/app.asar"
+node tools/patch-desktop-window-background.mjs --apply "C:/App/ZCode/resources/app.asar"
+```
+
+脚本会把 `app.asar` 备份成 `app.asar.bak-blackbars-<时间戳>`，重启 ZCode 生效。
+补丁只改 win32 分支的那一处 11 字节，macOS / Linux 的透明窗口配置不受影响。
+
 ## 已知限制
 
 - 插件 system 段是本构建的能力，换回官方客户端会静默失效；
