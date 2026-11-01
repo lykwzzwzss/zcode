@@ -6,11 +6,12 @@ import {
   CompactStatusOutputSchema,
   CoreErrorType,
   createCoreError,
+  selectActiveConversationBranch,
   type CompactStatusOutput,
   type MessageWithParts,
 } from "@zcode/contracts";
 import type { ToolEntry, ToolHandler } from "../types.js";
-import { collectCompactedRanges, foldedWindowForRange } from "./context-memory-store.js";
+import { collectCompactedRanges, collectFoldedMessageIndexes } from "./context-memory-store.js";
 
 const MAX_MODEL_BYTES = 40_000;
 const TIMEOUT_MS = 20_000;
@@ -26,8 +27,17 @@ export const compactStatusHandler: ToolHandler = async (input, context) => {
   }
 
   let messages: MessageWithParts[];
+  let branchMessages: MessageWithParts[];
   try {
     messages = await context.sessionStore.messages({ sessionID: context.sessionId });
+    const session = await context.sessionStore.getSession(context.sessionId);
+    // 只统计当前分支：rewind 掉的旧分支还在 append-only store 里，不能算进来。
+    branchMessages = selectActiveConversationBranch(messages, {
+      branchCutAfterMessageId: session?.revert?.branchCutAfterMessageID,
+      rewindCreatedMessageId: session?.revert?.createdMessageID,
+      rewindKeptMessageIds: session?.revert?.keptMessageIDs,
+      rewindTargetMessageId: session?.revert?.targetMessageID,
+    });
   } catch (error) {
     if (context.abortSignal.aborted) throw error;
     return {
@@ -40,19 +50,15 @@ export const compactStatusHandler: ToolHandler = async (input, context) => {
       status: "failed",
     } satisfies CompactStatusOutput;
   }
-  const ranges = collectCompactedRanges(messages);
+  const ranges = collectCompactedRanges(branchMessages);
   const last = ranges.at(-1);
-  const foldedWindows = ranges.map((range) => foldedWindowForRange(ranges, range));
-  const foldedIndexes = new Set<number>();
-  for (const window of foldedWindows) {
-    for (let index = window.start; index < window.end; index += 1) foldedIndexes.add(index);
-  }
+  const foldedIndexes = collectFoldedMessageIndexes(branchMessages, ranges);
 
   return {
-    activeMessageCount: messages.length - foldedIndexes.size,
+    activeMessageCount: branchMessages.length - foldedIndexes.size,
     foldedMessageCount: foldedIndexes.size,
     lastCompactAt: last?.createdAt,
-    messageCount: messages.length,
+    messageCount: branchMessages.length,
     ranges: ranges.map((range) => ({
       boundaryId: range.boundaryId,
       createdAt: range.createdAt,

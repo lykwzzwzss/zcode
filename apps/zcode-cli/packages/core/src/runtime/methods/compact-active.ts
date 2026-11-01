@@ -217,14 +217,13 @@ async function compactActiveConversationImpl(
   let currentSelection = initialSelection;
   let preservedEntries = currentSelection.preservedEntries;
   const initialEntriesForSummary = currentSelection.entriesForSummary;
-  let entriesForSummary = initialEntriesForSummary;
-  // 增量折叠：上一代摘要是「已折叠内容的索引」，不是待折叠的内容。
-  // 把它从摘要请求里摘出去、原样保留到新历史里，折叠成本就随新增区间线性增长，
-  // 而不是每折一次就把整段旧摘要再送一遍模型。
-  let priorSummaryEntries = collectPriorCompactSummaries(entriesForSummary);
-  entriesForSummary = excludePriorCompactSummaries(entriesForSummary);
-  // 重试路径要复用「已剔除旧摘要」的数组：直接退回 initialEntriesForSummary 会把旧摘要
-  // 重新塞进摘要请求，首试与重试两套行为。
+  // 增量折叠：最近 MAX_RETAINED_COMPACT_SUMMARIES 层摘要是「已折叠内容的索引」，
+  // 不参与本次摘要请求；更早的层仍要进摘要请求，否则第 5 层起既不摘要也不保留，
+  // 摘要链会静默出现覆盖缺口。
+  const initialSplit = splitRetainedSummaries(initialEntriesForSummary);
+  let priorSummaryEntries = initialSplit.priorSummaryEntries;
+  let entriesForSummary = initialSplit.entriesForSummary;
+  // 重试路径要复用这份拆分结果：直接退回 initialEntriesForSummary 会改变首试/重试行为。
   const entriesForSummaryAfterExclusion = entriesForSummary;
   let entriesToSummarize = getRuntimeEntriesToSummarize(entriesForSummary);
   const preCompactTokenCount = estimateRuntimeEntryTokens(activeEntries, {
@@ -334,9 +333,12 @@ async function compactActiveConversationImpl(
         currentSelection = reselected;
         preservedEntries = reselected.preservedEntries;
         entriesForSummary = reselected.entriesForSummary;
-        // 重新选择后同样要摘掉旧摘要，否则超窗重试会把它们又塞回摘要请求。
-        priorSummaryEntries = collectPriorCompactSummaries(entriesForSummary);
-        entriesForSummary = excludePriorCompactSummaries(entriesForSummary);
+        // 重新选择后同样只摘掉要保留的那几层；更早的层继续进摘要请求。
+        // 这里禁用非增量回退：重选阶段没有 skipped 风险，把旧摘要重新灌回去
+        // 只会在 prompt-too-long 恢复链上二次撑大请求。
+        const reselectedSplit = splitRetainedSummaries(entriesForSummary, false);
+        priorSummaryEntries = reselectedSplit.priorSummaryEntries;
+        entriesForSummary = reselectedSplit.entriesForSummary;
         entriesToSummarize = getRuntimeEntriesToSummarize(entriesForSummary);
         return true;
       };
@@ -721,6 +723,16 @@ async function compactActiveConversationImpl(
         options.abortSignal,
       );
       const providerPostCompactTokenCount = getUsageTotalTokens(result.usage);
+      if (preservedEntries.length > 0 && !preservation.preservedSegment) {
+        // live 保留了尾巴、boundary 却没声明：冷恢复会把这一段丢掉，至少留痕。
+        this.logger?.warn("Compact preserved entries have no persisted segment", {
+          ...traceContextToLogContext(turnTraceContext),
+          event: "compact.preserved_segment.missing",
+          module: "core.runtime",
+          preservedEntryCount: preservedEntries.length,
+          status: "failed",
+        });
+      }
       const compactBoundary = buildManualCompactBoundary({
         ...discovery,
         autoCompactThreshold: options.autoCompactThreshold,
@@ -929,9 +941,38 @@ function collectPriorCompactSummaries(
   return entries.filter(isPriorCompactSummaryEntry);
 }
 
-function excludePriorCompactSummaries(entries: RuntimeMessageEntry[]): RuntimeMessageEntry[] {
-  const kept = entries.filter((entry) => !isPriorCompactSummaryEntry(entry));
-  return kept.length === entries.length ? entries : kept;
+/**
+ * 把「保留的最近几层摘要」从摘要输入里摘出来，更早的层留在输入里一起重写。
+ * 只摘不写会让旧层既不在上下文、也不在新摘要里，形成静默的覆盖缺口。
+ */
+function splitRetainedSummaries(
+  entries: RuntimeMessageEntry[],
+  fallbackWhenInsufficient = true,
+): {
+  priorSummaryEntries: RuntimeMessageEntry[];
+  entriesForSummary: RuntimeMessageEntry[];
+} {
+  const prior = collectPriorCompactSummaries(entries);
+  if (prior.length === 0) return { priorSummaryEntries: [], entriesForSummary: entries };
+  const retained = prior.slice(-MAX_RETAINED_COMPACT_SUMMARIES);
+  const retainedSet = new Set(retained);
+  const withoutRetained = entries
+    .filter((entry) => !(isPriorCompactSummaryEntry(entry) && retainedSet.has(entry)))
+    // 更早的层要进摘要请求，但同样只送正文：续写前言留在输入里会被摘要器抄进新摘要。
+    .map((entry) => (isPriorCompactSummaryEntry(entry) ? stripPriorSummaryEntry(entry) : entry));
+  // 新增区间太少、只剩旧摘要时不能直接 skipped：退回非增量，把旧摘要一起重写，
+  // 否则 prompt-too-long 的恢复路径会把原始超窗错误抛回去。
+  if (
+    fallbackWhenInsufficient &&
+    !hasEnoughRuntimeEntriesToCompact(withoutRetained) &&
+    hasEnoughRuntimeEntriesToCompact(entries)
+  ) {
+    return { priorSummaryEntries: [], entriesForSummary: entries };
+  }
+  return {
+    priorSummaryEntries: retained.map(stripPriorSummaryEntry),
+    entriesForSummary: withoutRetained,
+  };
 }
 
 function isPriorCompactSummaryEntry(entry: RuntimeMessageEntry): boolean {
@@ -939,4 +980,43 @@ function isPriorCompactSummaryEntry(entry: RuntimeMessageEntry): boolean {
   const metadata = (entry as CompactSummaryEntryShape).metadata;
   // 冷恢复出来的保留摘要没有 compactBoundary，只有 hydrated 标记。
   return metadata?.compactBoundary !== undefined || metadata?.retainedCompactSummary === true;
+}
+
+// 保留层每折一次多一层；不设上限的话，每次折叠都要把全部历史摘要再落盘一遍，
+// 上下文下限也会随折叠次数单调抬高。超过上限的旧层仍可从 SearchContext/DecompressContext 取回。
+const MAX_RETAINED_COMPACT_SUMMARIES = 4;
+
+const COMPACT_SUMMARY_PREAMBLE =
+  "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.";
+
+const COMPACT_SUMMARY_FOOTERS = [
+  "\nContinue the conversation from where it left off without asking the user any further questions.",
+  "\nIf you need specific details from before compaction",
+  "\nYour REPL VM state has been cleared as part of this compaction.",
+] as const;
+
+/**
+ * 保留的是旧摘要的「索引正文」，不是整条续写消息。
+ * 原样保留会把每层的「不要向用户提问、直接继续」重复堆进上下文。
+ */
+function stripCompactSummaryPreamble(text: string): string {
+  let body = text.trimStart();
+  if (body.startsWith(COMPACT_SUMMARY_PREAMBLE)) {
+    body = body.slice(COMPACT_SUMMARY_PREAMBLE.length).trimStart();
+  }
+  for (const marker of COMPACT_SUMMARY_FOOTERS) {
+    const index = body.indexOf(marker);
+    if (index >= 0) body = body.slice(0, index).trimEnd();
+  }
+  return body;
+}
+
+function stripPriorSummaryEntry(entry: RuntimeMessageEntry): RuntimeMessageEntry {
+  if (entry.kind === "attachment") return entry;
+  const content = entry.message.content;
+  if (typeof content !== "string") return entry;
+  const stripped = stripCompactSummaryPreamble(content);
+  return stripped === content
+    ? entry
+    : { ...entry, message: { ...entry.message, content: stripped } };
 }

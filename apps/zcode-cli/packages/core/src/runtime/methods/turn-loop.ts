@@ -100,6 +100,15 @@ export async function runRegularTurnLoop(
     const tools = getTurnTools(this, state);
     finishTools();
 
+    if (this.config.taskType !== "subagent_child") {
+      // nudge 是 per_current_turn：必须在折叠判定之前清掉上一步的提醒。
+      // 否则折叠时它还在 activeEntries 里，可能被保留段克隆进 canonical history；
+      // 清理放在“生成新提醒”之后时，这条路就漏了。稍后按当前水位重新决定是否注入。
+      state.turnRequestState.entries = state.turnRequestState.entries.filter(
+        (entry) => !(entry.kind === "attachment" && entry.metadata?.source === "compact_nudge"),
+      );
+    }
+
     // 输入附件在 compaction 之前运行：本轮输入或上一批工具结果产生的项属于 compaction
     // 保留或摘要的历史。只在有新输入时收集（轮首、完整工具批次之后、文本回复后续上 guide）；
     // 新轮通知的首个请求跳过。
@@ -143,8 +152,12 @@ export async function runRegularTurnLoop(
         state.events,
         {
           abortSignal: state.turnAbortSignal,
-          // 模型自决压缩归到 context_limit：它读到的正是上下文水位，不是用户 /compact。
-          compactReason: CompactReason.ContextLimit,
+          // task_shift / user_request 是模型主动要求，不该在 telemetry 里记成阈值折叠；
+          // context_pressure 才归 context_limit。trigger 仍用 Auto 以保留重试语义。
+          compactReason:
+            pendingCompact.reason === "user_request" || pendingCompact.reason === "task_shift"
+              ? CompactReason.UserRequested
+              : CompactReason.ContextLimit,
           phase: compactPhase,
           trigger: CompactTrigger.Auto,
           activeEntries: state.turnRequestState.entries,
@@ -191,12 +204,9 @@ export async function runRegularTurnLoop(
     // 增长提醒：放在自动折叠之后——刚折完水位已降，不该再催一次。
     // 子代理运行时没有 compactControlPort，催它调一个必然 rejected 的工具没有意义。
     if (this.config.taskType !== "subagent_child") {
+      // 上一步的提醒已在迭代开头清掉；这里只按当前水位决定是否重新注入。
       const compactNudge = buildCompactNudgeEntry(this, state.turnRequestState.entries, state.model);
       if (compactNudge) {
-        // 同一 turn 里可能跨过多个 40k 水位；只保留最新一条，避免同一请求里叠两条提醒。
-        state.turnRequestState.entries = state.turnRequestState.entries.filter(
-          (entry) => !(entry.kind === "attachment" && entry.metadata?.source === "compact_nudge"),
-        );
         appendTurnRequestEntries(state.turnRequestState, [compactNudge]);
       }
     }

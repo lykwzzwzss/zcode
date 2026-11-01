@@ -2,20 +2,22 @@ import {
   systemReminderAttachmentEntry,
   type RuntimeMessageEntry,
 } from "../../agent/message-history.js";
-import { DEFAULT_COMPACT_CONTEXT_WINDOW } from "../../compact/policy.js";
+import {
+  DEFAULT_COMPACT_CONTEXT_WINDOW,
+  getAutoCompactThreshold,
+} from "../../compact/policy.js";
 import type { Model } from "../deps.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { estimateRuntimeEntryTokens } from "../helpers/compact-selection.js";
 import { shouldUseMidConversationSystem } from "../helpers/runtime-provider-request-messages.js";
 
 // 增长提醒（nudge）对齐 billion-context 的两层设计：
-// - 增长层：绝对 50k 一步、与窗口大小无关（dsh 的 nudgeGrowthTokens），
-//   gate = max(20k, 0.45 × step) ≈ 22.5k，避免刚提过就反复催；
-// - 压力层：窗口 75% 起每轮提醒，95% 起换成紧急措辞
-//   （dsh 的 maxContextLimit 75% / emergencyThresholdPercent 95%）。
+// - 增长层：至少 50k 一步（大窗口按自动阈值的 10% 放大），
+//   gate = 45% 步长，避免刚提过就反复催；
+// - 压力层：自动折叠阈值（effective window − reserve − buffer）的 75% 起每轮提醒，
+//   95% 起换成紧急措辞（dsh 的 maxContextLimit 75% / emergencyThresholdPercent 95%）。
 // 只注入当轮请求（per_current_turn），不落历史——否则一次提示会永久留在上下文里。
 const NUDGE_GROWTH_TOKENS = 50_000;
-const NUDGE_GROWTH_GATE_TOKENS = 22_500;
 const NUDGE_PRESSURE_RATIO = 0.75;
 const NUDGE_EMERGENCY_RATIO = 0.95;
 
@@ -30,15 +32,28 @@ export function buildCompactNudgeEntry(
       ? shouldUseMidConversationSystem(runtime.config, model)
       : true,
   });
-  const contextWindow = model?.properties?.contextWindow ?? DEFAULT_COMPACT_CONTEXT_WINDOW;
-  const pressureAt = Math.floor(contextWindow * NUDGE_PRESSURE_RATIO);
-  const emergencyAt = Math.floor(contextWindow * NUDGE_EMERGENCY_RATIO);
+  // 和自动折叠用同一份阈值：effective window − output reserve − buffer。
+  // 用裸 contextWindow 会在宿主下发更小的 compact.contextWindow 时错位。
+  const autoCompactAt = getAutoCompactThreshold({
+    contextWindow: model?.properties?.contextWindow ?? DEFAULT_COMPACT_CONTEXT_WINDOW,
+    ...runtime.config.compact,
+    // 优先级与自动折叠一致（宿主 compact.* 不覆盖模型输出上限）：
+    // 模型输出上限小于 21k 时两侧必须按同一个 reserve 算阈值。
+    maxOutputTokens: model?.optionSpecs?.maxOutputTokens?.max,
+  });
+  // 窗口小到 threshold 归零时自动折叠会立刻接管，再催只会每轮刷屏。
+  if (autoCompactAt <= 0) return undefined;
+  // 大窗口模型按阈值比例放大增长步长（1M 窗口约 97k），小窗口保持 dsh 的 50k。
+  const growthStep = Math.max(NUDGE_GROWTH_TOKENS, Math.floor(autoCompactAt * 0.1));
+  const growthGate = Math.floor(growthStep * 0.45);
+  const pressureAt = Math.floor(autoCompactAt * NUDGE_PRESSURE_RATIO);
+  const emergencyAt = Math.floor(autoCompactAt * NUDGE_EMERGENCY_RATIO);
   const lastNudged = runtime.lastCompactNudgeTokenCount;
 
   if (tokens < pressureAt) {
-    // 增长层：水位到 50k 之后，每再涨 22.5k 才提一次。
-    if (tokens < NUDGE_GROWTH_TOKENS) return undefined;
-    if (lastNudged !== undefined && tokens - lastNudged < NUDGE_GROWTH_GATE_TOKENS) {
+    // 增长层：水位到步长之后，每再涨 45% 步长才提一次。
+    if (tokens < growthStep) return undefined;
+    if (lastNudged !== undefined && tokens - lastNudged < growthGate) {
       return undefined;
     }
   } else if (lastNudged === tokens) {
@@ -52,7 +67,11 @@ export function buildCompactNudgeEntry(
     "compact_nudge",
     [
       `上下文已约 ${Math.round(tokens / 1000)}k tokens（${
-        level === "emergency" ? "已超过窗口 95%" : level === "pressure" ? "已超过窗口 75%" : "增长提醒"
+        level === "emergency"
+          ? "已接近自动折叠阈值"
+          : level === "pressure"
+            ? "上下文压力偏高"
+            : "增长提醒"
       }）。`,
       level === "emergency"
         ? "立即调用 CompactNow 折叠一次，并在 instructions 里写死必须保留的文件、决策与精确字符串；被折叠的内容可用 SearchContext / DecompressContext 取回。"

@@ -570,6 +570,11 @@ export interface CompactionPart {
 export interface CompactionPartMetadata {
   /** summary 之前的请求前公告；冷恢复放回 summary 之前，切片之后的保留段时跳过。 */
   compactLeadingMessageIds?: MessageId[];
+  /**
+   * 增量折叠保留的上一代摘要消息。和 leading 一样是 provider-context 语义：
+   * fork 必须按 child message id 重映射，否则子会话冷恢复时匹配不到、整层摘要丢失。
+   */
+  compactRetainedMessageIds?: MessageId[];
 }
 
 export type TimelinePartDisplay = "separator" | "worklog";

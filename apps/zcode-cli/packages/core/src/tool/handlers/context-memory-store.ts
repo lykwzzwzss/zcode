@@ -22,6 +22,8 @@ export interface RenderedMessage {
   role: "user" | "assistant";
   createdAt: number;
   text: string;
+  /** 渲染时是否裁剪过任何 part；解压工具据此把 truncated 传给模型，不能假装原文完整。 */
+  truncated?: boolean;
 }
 
 const SNIPPET_RADIUS = 220;
@@ -56,7 +58,9 @@ function toRange(
     messageId: message.info.id,
     messageIndex,
     phase: boundary.phase,
-    postCompactTokenCount: boundary.postCompactTokenCount,
+    // postCompactTokenCount 取折叠那一刻的估算值，随后 replaceMessages 才真正瘦身，
+    // 所以它常常和 pre 相差无几；truePostCompactTokenCount 才是折叠后的实际上下文。
+    postCompactTokenCount: boundary.truePostCompactTokenCount ?? boundary.postCompactTokenCount,
     preCompactTokenCount: boundary.preCompactTokenCount,
     summarizedMessageCount: boundary.summarizedMessageCount,
     // 一个边界可能带多个 summary id（分层折叠时）；展示层取最近的一个。
@@ -65,8 +69,13 @@ function toRange(
   };
 }
 
-export function renderStoredMessage(message: MessageWithParts): RenderedMessage {
+export function renderStoredMessage(
+  message: MessageWithParts,
+  options: { toolOutputMaxChars?: number } = {},
+): RenderedMessage {
   const blocks: string[] = [];
+  let truncated = false;
+  const toolOutputMax = options.toolOutputMaxChars ?? TOOL_OUTPUT_MAX;
   for (const part of message.parts) {
     if (part.type === "text") {
       // 合成文本（summary、system reminder 渲染结果）不是模型原话，但仍然是上下文的一部分；
@@ -76,8 +85,9 @@ export function renderStoredMessage(message: MessageWithParts): RenderedMessage 
       continue;
     }
     if (part.type === "tool") {
-      const rendered = renderToolPart(part);
-      if (rendered) blocks.push(rendered);
+      const rendered = renderToolPart(part, toolOutputMax);
+      if (rendered.text) blocks.push(rendered.text);
+      truncated ||= rendered.truncated;
     }
   }
   return {
@@ -85,10 +95,11 @@ export function renderStoredMessage(message: MessageWithParts): RenderedMessage 
     messageId: message.info.id,
     role: message.info.role,
     text: blocks.join("\n"),
+    ...(truncated ? { truncated: true } : {}),
   };
 }
 
-function renderToolPart(part: ToolPart): string {
+function renderToolPart(part: ToolPart, outputMaxChars: number): { text: string; truncated: boolean } {
   // ToolState 是联合类型，这里只需要「发生了什么」，用结构化读取避免为展示层引入依赖。
   const state = part.state as unknown as {
     error?: unknown;
@@ -100,9 +111,15 @@ function renderToolPart(part: ToolPart): string {
   const input = summarizeToolInput(state.input);
   const error = typeof state.error === "string" ? state.error.trim() : "";
   const output = typeof state.output === "string" ? state.output.trim() : "";
-  if (error) return `${head} input: ${input || "-"} error: ${clip(error, TOOL_OUTPUT_MAX)}`;
-  if (output) return `${head} input: ${input || "-"} output: ${clip(output, TOOL_OUTPUT_MAX)}`;
-  return `${head} input: ${input || "-"}`;
+  if (error) {
+    const clipped = clipWithFlag(error, outputMaxChars);
+    return { text: `${head} input: ${input || "-"} error: ${clipped.text}`, truncated: clipped.truncated };
+  }
+  if (output) {
+    const clipped = clipWithFlag(output, outputMaxChars);
+    return { text: `${head} input: ${input || "-"} output: ${clipped.text}`, truncated: clipped.truncated };
+  }
+  return { text: `${head} input: ${input || "-"}`, truncated: false };
 }
 
 function summarizeToolInput(input: unknown): string {
@@ -146,8 +163,8 @@ export function scoreMessage(rendered: RenderedMessage, query: string, terms: re
 }
 
 export function buildSnippet(rendered: RenderedMessage, query: string, terms: readonly string[]): string {
-  const haystack = rendered.text.toLowerCase();
-  const anchor = firstMatchIndex(haystack, query, terms);
+  // 用原串做大小写不敏感查找：先 toLowerCase 再拿下标，遇到会变长的字母（如 İ）会切错位置。
+  const anchor = firstMatchIndex(rendered.text, query, terms);
   if (anchor < 0) return clip(rendered.text.trim(), SNIPPET_RADIUS * 2);
   const start = Math.max(0, anchor - SNIPPET_RADIUS);
   const end = Math.min(rendered.text.length, anchor + SNIPPET_RADIUS);
@@ -156,15 +173,24 @@ export function buildSnippet(rendered: RenderedMessage, query: string, terms: re
   return `${prefix}${rendered.text.slice(start, end).trim()}${suffix}`;
 }
 
-function firstMatchIndex(haystack: string, query: string, terms: readonly string[]): number {
-  const queryIndex = haystack.indexOf(query);
+function firstMatchIndex(text: string, query: string, terms: readonly string[]): number {
+  const queryIndex = indexOfCaseInsensitive(text, query);
   if (queryIndex >= 0) return queryIndex;
   let best = -1;
   for (const term of terms) {
-    const index = haystack.indexOf(term);
+    const index = indexOfCaseInsensitive(text, term);
     if (index >= 0 && (best < 0 || index < best)) best = index;
   }
   return best;
+}
+
+function indexOfCaseInsensitive(text: string, needle: string): number {
+  if (needle.length === 0) return -1;
+  const lower = text.toLowerCase();
+  // toLowerCase 会变长时（如 İ → i̇），lower 的下标与原串错位；退回精确查找，
+  // 宁可不命中，也不从错误位置切片段。
+  if (lower.length !== text.length) return text.indexOf(needle);
+  return lower.indexOf(needle);
 }
 
 /**
@@ -180,6 +206,56 @@ export function foldedWindowForRange(
     start: (previous?.messageIndex ?? -1) + 1,
     end: range.messageIndex,
   };
+}
+
+/**
+ * 边界窗口里仍留在 provider 上下文中的消息：保留段、请求前公告、上一代摘要。
+ * 这些不是 folded，检索不该标、解压不该重复注入。
+ */
+export function keptMessageIdsForRange(
+  messages: readonly MessageWithParts[],
+  range: CompactedRange,
+): Set<string> {
+  const kept = new Set<string>();
+  const boundaryMessage = messages[range.messageIndex];
+  if (!boundaryMessage) return kept;
+  for (const part of boundaryMessage.parts) {
+    if (part.type !== "compaction" || !part.compactBoundary) continue;
+    const metadata = part.metadata as Record<string, unknown> | undefined;
+    for (const key of ["compactLeadingMessageIds", "compactRetainedMessageIds"]) {
+      const ids = metadata?.[key];
+      if (!Array.isArray(ids)) continue;
+      for (const id of ids) if (typeof id === "string") kept.add(id);
+    }
+    const segment = part.compactBoundary.preservedSegment;
+    if (!segment) continue;
+    const head = messages.findIndex((message) => message.info.id === segment.headMessageId);
+    const tail = messages.findIndex((message) => message.info.id === segment.tailMessageId);
+    if (head >= 0 && tail >= head && tail < range.messageIndex) {
+      for (let index = head; index <= tail; index += 1) kept.add(messages[index]!.info.id);
+    }
+  }
+  return kept;
+}
+
+/** 真正被折叠掉的消息下标（窗口减去仍活跃的保留段/公告/旧摘要）。 */
+export function collectFoldedMessageIndexes(
+  messages: readonly MessageWithParts[],
+  ranges: readonly CompactedRange[],
+): Set<number> {
+  const folded = new Set<number>();
+  const lastRange = ranges.at(-1);
+  if (!lastRange) return folded;
+  // folded 的语义是「当前 provider 历史里已不存在」。当前历史就等于：
+  // 最后一个 boundary 声明的 kept（公告 + 保留摘要 + 保留段）+ boundary 本身及其之后。
+  // 逐层用各自 boundary 的 kept 会误标：被上限裁掉的旧摘要层、更早的 summary 行
+  // 还挂在自己的 boundary 声明里，实际已经不在上下文。
+  const kept = keptMessageIdsForRange(messages, lastRange);
+  for (let index = 0; index < lastRange.messageIndex; index += 1) {
+    const message = messages[index];
+    if (message && !kept.has(message.info.id)) folded.add(index);
+  }
+  return folded;
 }
 
 export function tokenize(query: string): string[] {
@@ -198,4 +274,9 @@ export function tokenize(query: string): string[] {
 export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function clipWithFlag(text: string, max: number): { text: string; truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false };
+  return { text: clip(text, max), truncated: true };
 }

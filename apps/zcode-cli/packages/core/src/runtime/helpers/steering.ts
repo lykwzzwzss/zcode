@@ -265,6 +265,17 @@ export function clonePartForFork(
         }),
       };
     }
+    const retainedIds: unknown = cloned.metadata?.compactRetainedMessageIds;
+    if (Array.isArray(retainedIds)) {
+      // 保留摘要在冷恢复时按 child message id 匹配；不重映射的话子会话里一层都放不回来。
+      cloned.metadata = {
+        ...cloned.metadata,
+        compactRetainedMessageIds: retainedIds.flatMap((id) => {
+          const mapped = messageIdMap.get(id);
+          return mapped ? [mapped] : [];
+        }),
+      };
+    }
     if (cloned.compactBoundary) {
       const boundary = cloned.compactBoundary;
       cloned.compactBoundary = {

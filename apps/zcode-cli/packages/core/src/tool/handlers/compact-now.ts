@@ -65,6 +65,9 @@ export const compactNowToolEntry: ToolEntry = {
     ],
     readOnly: false,
     destructive: false,
+    // 折叠是 session 作用域的非破坏动作；plan 模式下 auto-compact 本来就会发生，
+    // 拒绝这个入口只会让模型每 22.5k 白撞一次权限。
+    allowedInPlanMode: true,
     concurrentSafe: true,
     timeoutMs: TIMEOUT_MS,
     maxOutputBytes: MAX_MODEL_BYTES,

@@ -194,6 +194,10 @@ function assertForkBundleChildLocal(bundle: ForkCommitBundle): void {
         for (const id of Array.isArray(leadingIds) ? leadingIds : []) {
           assertMessage(id, "compact leading announcement");
         }
+        const retainedIds = part.metadata?.compactRetainedMessageIds;
+        for (const id of Array.isArray(retainedIds) ? retainedIds : []) {
+          assertMessage(id, "compact retained summary");
+        }
       }
       if (part.type === "tool" && part.state.status === "completed") {
         for (const attachment of part.state.attachments ?? []) {
