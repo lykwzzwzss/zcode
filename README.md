@@ -104,8 +104,10 @@ zcode plugins install infinite-fantasy-origins@zcode-infinite-fantasy
 ## 已知限制
 
 - 插件 system 段是本构建的能力，换回官方客户端会静默失效；
-- 桌面宿主里 `LocalToolSearch` 会把工具「提升」出延迟目录，之后只能直连调用；
-  这四个工具请直接用 `DeferredToolCall`，不要先搜；
+- 这四个工具是延迟工具（`shouldDefer`），默认不出现在直连工具列表里：用
+  `DeferredToolCall` 按名字直接调用即可，不必先搜。若先用 `LocalToolSearch` 查过它们的
+  schema，下一轮它们会被「提升」成直连工具，此时 `DeferredToolCall` 会拒绝并提示改用普通
+  调用——不是失效，按提示直连即可；
 - `runtime-compact` 的部分用例在 Windows 上失败（测试用 `/tmp/...` 路径），与功能无关。
 
 ## 许可
