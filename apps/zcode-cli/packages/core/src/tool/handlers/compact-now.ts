@@ -53,8 +53,8 @@ export const compactNowHandler: ToolHandler = async (input, context) => {
 export const compactNowToolEntry: ToolEntry = {
   capability: "Queue a context compaction that runs before the next model request",
   metadata: {
-    // 与 SearchContext 同口径：deferred 才能被桌面宿主的 ToolSearch 暴露给模型。
-    shouldDefer: true,
+    // 与 SearchContext 同口径：四个工具常驻直连，system prompt 里也写了用法。
+    alwaysLoad: true,
     name: COMPACT_NOW_TOOL_NAME,
     description:
       "Ask the runtime to compact the conversation before the next model request, optionally with instructions about what the summary must keep.",

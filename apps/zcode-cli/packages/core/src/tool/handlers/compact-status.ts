@@ -79,8 +79,8 @@ export const compactStatusHandler: ToolHandler = async (input, context) => {
 export const compactStatusToolEntry: ToolEntry = {
   capability: "Report how much durable history exists and which ranges compaction folded away",
   metadata: {
-    // 与 SearchContext 同口径：deferred 才能被桌面宿主的 ToolSearch 暴露给模型。
-    shouldDefer: true,
+    // 与 SearchContext 同口径：四个工具常驻直连，system prompt 里也写了用法。
+    alwaysLoad: true,
     name: COMPACT_STATUS_TOOL_NAME,
     description:
       "Report persisted message counts and every compaction boundary (what was folded, when, how much).",

@@ -157,9 +157,9 @@ export const searchContextHandler: ToolHandler = async (input, context) => {
 export const searchContextToolEntry: ToolEntry = {
   capability: "Search the durable session transcript, including history folded away by compaction",
   metadata: {
-    // 桌面宿主只把 deferred 类 ZCode 工具经 ToolSearch 暴露给模型；不标记的话
-    // 这个工具既不在直连函数面、也不在延迟目录，模型根本调不到（与 ReadSessionContext 同口径）。
-    shouldDefer: true,
+    // 常驻直连：system prompt 的 Context management 段直接点名这四个工具，
+    // 再走延迟目录就会出现「提示让调、函数面里没有」的错位（bili 也是常驻）。
+    alwaysLoad: true,
     name: SEARCH_CONTEXT_TOOL_NAME,
     description:
       "Keyword-search the full persisted transcript of the current session, including messages that compaction already folded away.",

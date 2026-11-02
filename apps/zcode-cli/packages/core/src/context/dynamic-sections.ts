@@ -13,6 +13,13 @@ const ACTION_CAUTION_PROMPT =
 const CONTEXT_MANAGEMENT_PROMPT = [
   "# Context management",
   "When the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue \u2014 you don't need to wrap up early or hand off mid-task.",
+  "",
+  "Four tools manage this session's context. Folded text is never deleted \u2014 it stays in the durable transcript \u2014 so folding is recoverable, not destructive:",
+  "- CompactStatus \u2014 list the compaction boundaries: how many messages were folded, token counts before and after, when, and what triggered it. Check it when you are unsure whether something has already been folded.",
+  "- SearchContext \u2014 search the durable transcript by keyword, including messages that were folded away; hits from folded ranges are marked (folded). Use it before assuming a detail is gone.",
+  "- DecompressContext \u2014 restore the original text of a folded range (or explicit message ids) into the conversation. Search first, then restore only the range you need.",
+  "- CompactNow \u2014 ask the runtime to fold the conversation at the next safe point. Put the files, decisions, and exact strings that must survive into instructions; fold when most of the current context is already-consumed work.",
+  "Prefer these over re-deriving or re-asking: a detail SearchContext can find is not lost.",
 ].join("\n");
 
 const ACT_DONT_REDERIVE_PROMPT =

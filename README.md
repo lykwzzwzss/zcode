@@ -33,8 +33,9 @@
 - **自决落地在安全点**：`CompactNow` 只排队，真正的折叠发生在「工具批次结束、下一次模型请求之前」；
 - **增长提醒对齐 billion-context 的两层设计**：增长层至少 50k 一步（大窗口按自动阈值的 10%
   放大）、gate 为步长的 45%；压力层以自动折叠阈值为基准，75% 起提醒、95% 起换紧急措辞；
-- **工具按需暴露**：四个工具走宿主的延迟工具机制（`shouldDefer`）——schema 不进每轮请求，
-  `DeferredToolCall` 按名字即可直调；某个会话里搜过一次后，下一轮它转为直连工具；
+- **工具常驻 + 写进 system prompt**：四个工具以 `alwaysLoad` 直连暴露，`Context management`
+  段逐条写明用途与调用顺序（先 `CompactStatus` 看状态、`SearchContext` 找、再 `DecompressContext`、
+  必要时 `CompactNow`）。和 billion-context 一样，不指望模型自己去延迟目录里发现工具；
 - **折叠后写明取回方式**：新摘要的续写消息里直接点名 `SearchContext` / `DecompressContext`，
   模型不需要靠延迟工具目录自己想起来（子代理不注入这句）。
 

@@ -166,8 +166,8 @@ export const decompressContextHandler: ToolHandler = async (input, context) => {
 export const decompressContextToolEntry: ToolEntry = {
   capability: "Restore the original messages of a compacted range into the conversation",
   metadata: {
-    // 与 SearchContext 同口径：deferred 才能被桌面宿主的 ToolSearch 暴露给模型。
-    shouldDefer: true,
+    // 与 SearchContext 同口径：四个工具常驻直连，system prompt 里也写了用法。
+    alwaysLoad: true,
     name: DECOMPRESS_CONTEXT_TOOL_NAME,
     description:
       "Restore the original text of a compaction range (or explicit message ids) from the durable transcript.",
