@@ -152,6 +152,7 @@ export function buildCompactSummaryMessage(
     replStateCleared?: boolean;
     suppressFollowup?: boolean;
     transcriptPath?: string;
+    retrievalToolsAvailable?: boolean;
   } = {},
 ): string {
   let message = `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
@@ -160,6 +161,13 @@ ${formattedSummary}`;
 
   if (options.transcriptPath) {
     message += `\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: ${options.transcriptPath}`;
+  }
+
+  // 摘要不会提到「原文还能取回」。不写这句，模型只能靠延迟工具的目录自己想起来，
+  // 实际上就是不会去用。
+  if (options.retrievalToolsAvailable) {
+    message +=
+      "\n\nEarlier turns are not gone: SearchContext searches the durable session transcript (including folded messages, marked as (folded)), and DecompressContext restores the original text of a folded range into the conversation. Use them when you need a detail this summary compressed away.";
   }
 
   if (options.replStateCleared) {

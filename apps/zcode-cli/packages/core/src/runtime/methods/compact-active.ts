@@ -660,6 +660,8 @@ async function compactActiveConversationImpl(
       const summaryMessageContent = buildCompactSummaryMessage(persistedSummary, {
         // 与 summary 之前的请求前公告用同一判定：保留段非空。
         preservedMessagesKept: preservedEntries.length > 0,
+        // 子代理子运行时没有 compactControlPort，也不承诺检索工具。
+        retrievalToolsAvailable: this.config.taskType !== "subagent_child",
         suppressFollowup: true,
       });
       // Continue 没有对应 Session message；无 store 的统计也不能把它计入保留记录。
