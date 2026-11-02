@@ -32,7 +32,9 @@
   `truncated` 置真，同时受 116KB 字节上限约束；
 - **自决落地在安全点**：`CompactNow` 只排队，真正的折叠发生在「工具批次结束、下一次模型请求之前」；
 - **增长提醒对齐 billion-context 的两层设计**：增长层至少 50k 一步（大窗口按自动阈值的 10%
-  放大）、gate 为步长的 45%；压力层以自动折叠阈值为基准，75% 起提醒、95% 起换紧急措辞。
+  放大）、gate 为步长的 45%；压力层以自动折叠阈值为基准，75% 起提醒、95% 起换紧急措辞；
+- **工具按需暴露**：四个工具走宿主的延迟工具机制（`shouldDefer`）——schema 不进每轮请求，
+  `DeferredToolCall` 按名字即可直调；某个会话里搜过一次后，下一轮它转为直连工具。
 
 ### 2. 插件 system 段注入
 
@@ -104,10 +106,6 @@ zcode plugins install infinite-fantasy-origins@zcode-infinite-fantasy
 ## 已知限制
 
 - 插件 system 段是本构建的能力，换回官方客户端会静默失效；
-- 这四个工具是延迟工具（`shouldDefer`），默认不出现在直连工具列表里：用
-  `DeferredToolCall` 按名字直接调用即可，不必先搜。若先用 `LocalToolSearch` 查过它们的
-  schema，下一轮它们会被「提升」成直连工具，此时 `DeferredToolCall` 会拒绝并提示改用普通
-  调用——不是失效，按提示直连即可；
 - `runtime-compact` 的部分用例在 Windows 上失败（测试用 `/tmp/...` 路径），与功能无关。
 
 ## 许可
