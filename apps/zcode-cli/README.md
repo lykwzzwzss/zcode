@@ -23,3 +23,18 @@ Useful entry points:
 - [Contributor instructions](AGENTS.md)
 
 Run `pnpm --filter @zcode/cli dev` for source development. CLI code validation follows the contributor instructions; CLI tests are separate from the root unit-test suite.
+
+The repository root owns `pnpm-workspace.yaml`, `pnpm-lock.yaml`, and `turbo.json`.
+Do not create a second workspace or lockfile here: CLI packages depend on root
+packages such as `@zcode/shared` and `@zcode/provider-node`. CLI aggregate commands
+select only `apps/zcode-cli/packages/*` and `apps/zcode-cli/tools/*`; Turbo still
+builds their dependencies in the root workspace before running the selected tasks.
+
+```sh
+pnpm --dir apps/zcode-cli typecheck
+pnpm --dir apps/zcode-cli lint
+pnpm --dir apps/zcode-cli test
+```
+
+Run `node --test scripts/test/cli-test-environment.test.mjs` from the repository
+root to check workspace discovery, aggregate task scope, and dependency ordering.

@@ -15,9 +15,7 @@ const useBootstrapWithRemoteBuild = process.env.ZCODE_BOOTSTRAP_WITH_REMOTE === 
 const pnpmRunEnv = {
   ...process.env,
   ZCODE_ENV: await resolveBuiltinProviderBuildEnvironment({ root: repoRoot }),
-  // pnpm 11 的 verify-deps-before-run 会在 apps/zcode-cli 子 workspace
-  // 执行每个 run 前触发 pnpm install；子 workspace 运行时依赖根仓库 @zcode/shared，
-  // 自动 install 无法解析根 workspace 包，导致 dev:desktop:test 和 E2E onPrepare 失败。
+  // 依赖由根 workspace 的 frozen install 统一准备，构建过程中不隐式重新安装。
   PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: "false",
 };
 // Bug 根因：filesystem plugin seed 若缺少 Sharp closure，会一直到 screenshot/zoom 才报错。
@@ -160,10 +158,7 @@ if (useBootstrapWithRemoteBuild) {
 }
 
 if (!useTurboBuild) {
-  // Linux 容器 demo 里没有仓库级 turbo 根，`turbo --cwd apps/zcode-cli`
-  // 会把 apps/zcode-cli 当根目录，并拒绝 turbo.json 中指向 ../../packages/shared 的 inputs。
-  // 同时 agent 子 workspace 不包含根 packages/shared，但 agent 包依赖 @zcode/shared。
-  // 因此默认改用仓库根 workspace 的明确 pnpm 包顺序构建，避免 WDIO 前置构建卡在子 workspace 解析。
+  // 默认保留明确的 pnpm 构建顺序；可选 Turbo 路径也使用同一个根 workspace。
   for (const filter of defaultBuildFilters) {
     runCommand("pnpm", ["--filter", filter, "build"], {
       env: pnpmRunEnv,
@@ -181,22 +176,9 @@ if (!useTurboBuild) {
   process.exit(0);
 }
 
-runCommand(
-  "pnpm",
-  [
-    "exec",
-    "turbo",
-    "--skip-infer",
-    "--cwd",
-    "apps/zcode-cli",
-    "run",
-    "build:desktop-agent",
-    "--filter=@zcode/cli",
-  ],
-  {
-    env: pnpmRunEnv,
-    stdio: "inherit",
-  },
-);
+runCommand("pnpm", ["exec", "turbo", "run", "build:desktop-agent", "--filter=@zcode/cli"], {
+  env: pnpmRunEnv,
+  stdio: "inherit",
+});
 stageDevAgentBundle();
 stageDevCuaPluginRuntime({ env: cuaPluginRuntimeStagingEnv });

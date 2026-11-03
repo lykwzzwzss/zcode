@@ -19,7 +19,7 @@ It is intentionally not part of the default test suite because real-provider cas
 
 ## Local
 
-From the repository root:
+From `apps/zcode-cli` (the CLI directory):
 
 ```bash
 pnpm build
@@ -76,8 +76,11 @@ node e2e/compact-microcompact/run.mjs --dry-run
 
 ## Docker
 
+Run the following commands from `apps/zcode-cli`, using the repository root as
+the Docker build context so root workspace dependencies and patches are included.
+
 ```bash
-docker build -f e2e/compact-microcompact/Dockerfile -t zcode-compact-microcompact .
+docker build -f e2e/compact-microcompact/Dockerfile -t zcode-compact-microcompact ../..
 docker run --rm -e ZCODE_API_KEY zcode-compact-microcompact
 ```
 
@@ -114,7 +117,7 @@ docker build \
   --build-arg NODE_IMAGE=node:24-bookworm-slim \
   --build-arg NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
   -f e2e/compact-microcompact/Dockerfile \
-  -t zcode-compact-microcompact .
+  -t zcode-compact-microcompact ../..
 ```
 
 `@mbears` packages default back to `https://registry.npmjs.org/` because some mirrors may not sync private or scoped packages. Override `MBEARS_NPM_CONFIG_REGISTRY` only when your mirror has those packages.

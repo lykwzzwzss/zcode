@@ -1,8 +1,13 @@
-import { posix } from "node:path";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, join, posix, resolve } from "node:path";
 
-/** Windows 独立 pnpm 是可执行程序，交给 Node 读取会把 MZ 文件头误报为语法错误。 */
-export function packageManagerCommand(pnpm, node, args) {
-  return /\.exe$/iu.test(pnpm) ? { file: pnpm, args } : { file: node, args: [pnpm, ...args] };
+/** 根 workspace 的 pnpm exec 会混入提示且优先根 binary；直接执行目标包实际解析的版本。 */
+export async function oxlintCommand(cwd, node, args) {
+  const require = createRequire(join(cwd, "package.json"));
+  const manifestPath = require.resolve("oxlint/package.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  return { file: node, args: [resolve(dirname(manifestPath), manifest.bin.oxlint), ...args] };
 }
 
 /** 当前各包都是直接 oxlint；未知脚本必须显式接入，不能被枚举器悄悄漏过。 */

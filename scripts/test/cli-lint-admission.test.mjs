@@ -1,19 +1,47 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 import {
   classifyLintDiagnostics,
+  oxlintCommand,
   parseLintCommand,
-  packageManagerCommand,
 } from "../cli-lint-admission.mjs";
 
-test("CLI lint 同时支持独立 pnpm.exe 与 Node 脚本入口", () => {
-  assert.deepEqual(packageManagerCommand("C:/tools/pnpm.exe", "node", ["exec", "oxlint"]), {
-    file: "C:/tools/pnpm.exe",
-    args: ["exec", "oxlint"],
-  });
-  assert.deepEqual(packageManagerCommand("/tools/pnpm.cjs", "node", ["exec", "oxlint"]), {
-    file: "node",
-    args: ["/tools/pnpm.cjs", "exec", "oxlint"],
+test("CLI lint 使用包实际解析的版本并保留 cwd、参数，不经过 pnpm 输出", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "cli lint-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cli = join(root, "apps/cli");
+  const cwd = join(cli, "packages/example");
+  await mkdir(cwd, { recursive: true });
+  for (const [parent, version] of [
+    [root, "root"],
+    [cli, "cli"],
+  ]) {
+    const directory = join(parent, "node_modules/oxlint");
+    await mkdir(join(directory, "bin"), { recursive: true });
+    await writeFile(
+      join(directory, "package.json"),
+      JSON.stringify({
+        name: "oxlint",
+        bin: { oxlint: "bin/lint.cjs" },
+      }),
+    );
+    await writeFile(
+      join(directory, "bin/lint.cjs"),
+      `console.log(JSON.stringify({version: '${version}', cwd: process.cwd(), args: process.argv.slice(2)}));`,
+    );
+  }
+  const args = ["src", "--no-ignore", "--format", "json"];
+  const command = await oxlintCommand(cwd, process.execPath, args);
+  const result = await promisify(execFile)(command.file, command.args, { cwd });
+  assert.deepEqual(JSON.parse(result.stdout), {
+    version: "cli",
+    cwd,
+    args,
   });
 });
 

@@ -40,12 +40,12 @@ ZCode 的默认发布形态仍然是标准 Node.js CLI 包：`dist/zcode.cjs` �
 
 用户接口：
 
-- `pnpm run build:sea`：从仓库根依赖中解析 Turbo，并通过
-  `--cwd apps/zcode-cli` 在 CLI workspace 内用 `--force` 重建 CLI 之外的 package，
-  再直接重建 CLI bundle，最后构建首批全部 target；仓库包含嵌套 pnpm workspace，
-  因此 package 脚本不能用 `--workspace-root` 解析 Turbo，否则会错误限定到缺少该
-  binary 的内层 workspace。该流程既避免复用旧 package `dist`，也不把已有 SEA
-  产物写入 CLI build cache。
+- `pnpm run build:sea`：从仓库根依赖中解析 Turbo，使用唯一的根 workspace 与锁文件；
+  通过目录 filter 选择 `apps/zcode-cli/packages/*`、`apps/zcode-cli/tools/*`，
+  排除 `@zcode/cli`，并用 `--force` 重建选中包及其真实依赖（含根目录共享包）。
+  再直接重建 CLI bundle，最后构建首批全部 target。聚合包 `zcode-cli` 不进入
+  Turbo 任务图，避免递归调用；不再维护内层 workspace 或锁文件。该流程既避免复用
+  旧 package 产物，也不把已有 SEA 产物写入 CLI build cache。
 - 根目录 `pnpm build:sea:all`：安装依赖后转发到同一个 all-target `build:sea` 入口。
 - `pnpm run sea -- <target 参数>`：只封装当前已有的 `dist/zcode.cjs` 和 runtime
   assets，不负责重新编译 workspace。

@@ -178,7 +178,7 @@ test("keeps package SEA build scripts aligned with the existing all-target contr
 
   assert.equal(
     cliPackage.scripts["build:sea"],
-    "pnpm --dir ../../../.. exec turbo --skip-infer --cwd apps/zcode-cli run build --filter=!@zcode/cli --force && pnpm build && node scripts/build-sea.mjs --all",
+    "pnpm --dir ../../../.. exec turbo run build --filter=./apps/zcode-cli/packages/* --filter=./apps/zcode-cli/tools/* --filter=!@zcode/cli --force && pnpm build && node scripts/build-sea.mjs --all",
   );
   assert.equal(cliPackage.scripts["build:sea:all"], undefined);
   assert.equal(cliWorkspacePackage.scripts["build:sea"], "pnpm --filter @zcode/cli build:sea");
@@ -1245,7 +1245,7 @@ test("matches host targets using Node.js platform names", () => {
 test("resolves Turbo from the repository while retaining the CLI workspace graph", () => {
   const cliPackageRoot = new URL("..", import.meta.url);
 
-  // 回归原因：CLI 是嵌套 workspace，--workspace-root 会把 Turbo 限定到未安装 binary 的内层 node_modules。
+  // 回归原因：旧子锁丢失 workspace；SEA 必须使用根图，同时限定 CLI 包，避免递归聚合脚本。
   const result = spawnSync(
     "pnpm",
     [
@@ -1253,11 +1253,10 @@ test("resolves Turbo from the repository while retaining the CLI workspace graph
       "../../../..",
       "exec",
       "turbo",
-      "--skip-infer",
-      "--cwd",
-      "apps/zcode-cli",
       "run",
       "build",
+      "--filter=./apps/zcode-cli/packages/*",
+      "--filter=./apps/zcode-cli/tools/*",
       "--filter=!@zcode/cli",
       "--force",
       "--dry=json",
@@ -1270,8 +1269,13 @@ test("resolves Turbo from the repository while retaining the CLI workspace graph
   );
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(
+    result.stderr,
+    /Unable to calculate transitive closures|not found in lockfile/u,
+  );
   assert.match(result.stdout, /"taskId":/u);
   assert.doesNotMatch(result.stdout, /"package": "@zcode\/cli"/u);
+  assert.doesNotMatch(result.stdout, /"package": "zcode-cli"/u);
 });
 
 test("can be dynamically imported when argv[1] is missing", () => {

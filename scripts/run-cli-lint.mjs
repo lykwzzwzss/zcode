@@ -6,11 +6,7 @@ import { dirname, resolve, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy } from "./architecture/policy.mjs";
 import { pristineUpstreamFiles } from "./architecture/upstream-admission.mjs";
-import {
-  classifyLintDiagnostics,
-  parseLintCommand,
-  packageManagerCommand,
-} from "./cli-lint-admission.mjs";
+import { classifyLintDiagnostics, oxlintCommand, parseLintCommand } from "./cli-lint-admission.mjs";
 
 const exec = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,9 +37,7 @@ async function main() {
       if (!manifest.scripts?.lint) continue;
       const args = [...parseLintCommand(manifest.scripts.lint), "--format", "json"];
       // 沿用各包解析出的 oxlint 版本、cwd 和原参数；包级配置仍由 oxlint 自己读取。
-      const pnpm = process.env.npm_execpath;
-      if (!pnpm) throw new Error("请通过 pnpm lint 运行 CLI lint");
-      const command = packageManagerCommand(pnpm, process.execPath, ["exec", "oxlint", ...args]);
+      const command = await oxlintCommand(cwd, process.execPath, args);
       let result;
       try {
         result = await exec(command.file, command.args, {
@@ -54,6 +48,7 @@ async function main() {
         if (error.code !== 1 || !error.stdout) throw error;
         result = error;
       }
+      if (result.stderr) process.stderr.write(result.stderr);
       const report = JSON.parse(result.stdout);
       if (!Array.isArray(report.diagnostics))
         throw new Error(`${manifest.name}: 无法解析 oxlint 结果`);
