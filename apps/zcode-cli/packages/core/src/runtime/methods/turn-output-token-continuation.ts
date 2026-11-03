@@ -101,9 +101,9 @@ export function appendTurnRequestEntries(
   state.entries = [...state.entries, ...entries];
 }
 
-export function commitTurnRequestEntries(
+/** canonical 历史与未完成的压缩重放输入由同一入口推进，支持 turn 收尾阶段的追加。 */
+export function commitRuntimeHistoryEntries(
   runtime: AgentRuntimeInternal,
-  state: TurnRequestState,
   entries: readonly RuntimeMessageEntry[],
 ): void {
   if (entries.length === 0) return;
@@ -114,6 +114,14 @@ export function commitTurnRequestEntries(
     const pending = runtime.pendingCommittedCompactApply;
     runtime.pendingCommittedCompactApply = { ...pending, entries: [...pending.entries, ...entries] };
   }
+}
+
+export function commitTurnRequestEntries(
+  runtime: AgentRuntimeInternal,
+  state: TurnRequestState,
+  entries: readonly RuntimeMessageEntry[],
+): void {
+  commitRuntimeHistoryEntries(runtime, entries);
   appendTurnRequestEntries(state, entries);
 }
 

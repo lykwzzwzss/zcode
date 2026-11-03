@@ -2,6 +2,8 @@ import { createMessageId, traceContextToLogContext } from "../deps.js";
 import type { TraceContext } from "../deps.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import type { ActiveTurnSteeringState } from "../types.js";
+import { systemReminderAttachmentEntry } from "../../agent/message-history.js";
+import { commitRuntimeHistoryEntries } from "./turn-output-token-continuation.js";
 
 export async function recordGoalStateChangeReminder(
   this: AgentRuntimeInternal,
@@ -67,7 +69,8 @@ async function materializeGoalStateChangeReminder(
   traceContext: TraceContext,
 ): Promise<void> {
   await this.ensureContextInitialized(traceContext);
-  this.messageHistory.addAttachment("goal_state_change", text);
+  // 停止收尾可能晚于已提交压缩失败；与 interrupt marker 共用写入入口，防止下轮重放丢掉暂停提醒。
+  commitRuntimeHistoryEntries(this, [systemReminderAttachmentEntry("goal_state_change", text)]);
   await this.persistSyntheticUserNoticeForSession({
     messageID: createMessageId(),
     sessionId: this.sessionId,

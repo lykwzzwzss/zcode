@@ -23,6 +23,7 @@ import { resolvePluginSystemPrompts } from "../packages/adapters/src/plugins/sys
 import { applyPluginSystemPrompts } from "../packages/core/src/runtime/methods/context.js";
 import { planCompactRanges } from "../packages/core/src/runtime/methods/compact-active-ranges.js";
 import type { AgentRuntimeInternal } from "../packages/core/src/runtime/internal.js";
+import { recordGoalStateChangeReminder } from "../packages/core/src/runtime/methods/goal-state-reminder.js";
 
 async function fixture() {
   const store = await createSqliteSessionStore({ dbPath: ":memory:" }),
@@ -172,6 +173,7 @@ describe("native context review regressions", () => {
         const originalHook = live.runPostCompactHooks;
         if (failurePoint === "post_compact_hook") {
           live.runPostCompactHooks = async () => {
+            await recordGoalStateChangeReminder.call(live, { text: "REVIEW_GOAL_PAUSED_AFTER_COMMIT" });
             abort.abort();
             abort.signal.throwIfAborted();
             throw new Error("unreachable");
@@ -180,8 +182,10 @@ describe("native context review regressions", () => {
           const commit = f.store.commitMessageBundle!.bind(f.store);
           f.store.commitMessageBundle = async (input) => {
             await commit(input);
-            if (input.messages.some((message) => message.parts.some((part) => part.type === "compaction" && part.compactBoundary)))
+            if (input.messages.some((message) => message.parts.some((part) => part.type === "compaction" && part.compactBoundary))) {
+              await recordGoalStateChangeReminder.call(live, { text: "REVIEW_GOAL_PAUSED_AFTER_COMMIT" });
               abort.abort();
+            }
           };
           const replace = live.messageHistory.replaceMessages.bind(live.messageHistory);
           let failOnce = true;
@@ -205,11 +209,14 @@ describe("native context review regressions", () => {
         live.runPostCompactHooks = originalHook;
         await runtime.executeTurn("continue after stopping");
         expect(requests.at(-1)).toContain("[Request interrupted by user]");
+        expect(requests.at(-1)).toContain("REVIEW_GOAL_PAUSED_AFTER_COMMIT");
         expect(requests.at(-1)).toContain("REVIEW_COMMITTED_SUMMARY");
         expect(requests.at(-1)).not.toContain("REVIEW_OLD_ORIGINAL");
         expect(markers().map((entry) => entry.messageId)).toEqual([markerId]);
         const recovered = makeRuntime();
         await recovered.resumeFromStore();
+        expect(JSON.stringify((recovered as unknown as AgentRuntimeInternal).messageHistory.borrowReadOnlyRuntimeEntries()))
+          .toContain("REVIEW_GOAL_PAUSED_AFTER_COMMIT");
         expect((recovered as unknown as AgentRuntimeInternal).messageHistory.borrowReadOnlyRuntimeEntries()
           .filter((entry) => entry.metadata?.source === "interrupt_marker")
           .map((entry) => entry.messageId)).toEqual([markerId]);

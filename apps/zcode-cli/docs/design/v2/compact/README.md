@@ -244,7 +244,8 @@ interrupted；记录 `compact.post_commit.failed` 后向上暴露原错误。提
 以存储/重建结果为唯一事实，会清空重放输入。未写完的 started/retrying 时间线由既有 resume
 恢复入口根据 operationId 对应的持久化 boundary 收敛为 completed。PostCompact 观察的是已提交
 的活跃历史，返回的 additionalContext 在替换之后追加。
-停止收尾期间追加的已提交条目（尤其 interrupt marker）也必须追加到同一份待重放输入；
+停止收尾期间追加的已提交条目（interrupt marker、目标暂停/状态提醒）通过同一历史写入入口
+追加到同一份待重放输入；
 下一轮重放只替换折叠前历史，不能覆盖提交后的新条目。冷恢复与 rewind 计算对话和 assistant
 锚点时排除 provider-hidden 时间线，区间压缩后立即恢复也必须保留尾部正文的锚点。
 回归覆盖：前缀/ranges 的提交前取消、提交期间取消、bundle 写失败、boundary 事件失败、
