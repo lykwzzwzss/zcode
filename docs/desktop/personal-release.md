@@ -12,8 +12,9 @@ Windows PowerShell 构建入口：设置 `$env:ZCODE_ENV='production'`、
 
 流程：完成源码与测试 → `pnpm version:personal` → 提交源码 → Windows x64 完整构建与安装包
 验证 → 本机安装并核对版本和内核 → 推送个人仓库 → 创建 `v版本号` Release。
-`--date YYYYMMDD` 仅用于复现指定构建日期。已发布的同名 tag/Release 不覆盖；一天多次正式
-发布时先决定新版本规则，不能伪造日期。
+`--date YYYYMMDD` 仅用于复现指定构建日期。已发布的同名 tag/Release 不覆盖；同日再次发布
+使用 `pnpm version:personal --revision 2`，追加 `v2`，例如 `3.17.1-20261103.v2`；后续为
+`v3`、`v4`。日期仍用北京时间，不追加小时分钟，不伪造日期或递增上游基础版本。
 
 源码、tag 和安装包 metadata 指向同一提交。Release 附件仅为 Windows `.exe` 安装包，
 SHA-256 写入发布说明；不上传 unpacked、blockmap、更新清单或依赖缓存。上游 remote 保留，

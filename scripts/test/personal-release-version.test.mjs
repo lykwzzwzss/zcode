@@ -22,6 +22,14 @@ test("build date uses Beijing midnight across UTC dates", () => {
   assert.equal(beijingBuildDate(new Date("2026-11-02T15:59:59Z")), "20261102");
   assert.equal(beijingBuildDate(new Date("2026-11-02T16:00:00Z")), "20261103");
 });
+
+test("same-day releases use revision suffixes without changing the upstream base", () => {
+  assert.equal(personalReleaseVersion("3.17.1-20261103", "20261103", 2), "3.17.1-20261103.v2");
+  assert.equal(personalReleaseVersion("3.17.1-20261103.v2", "20261103", 3), "3.17.1-20261103.v3");
+  assert.equal(personalReleaseVersion("3.17.1-20261103.v3", "20261104"), "3.17.1-20261104");
+  for (const invalid of [0, 1, -1, 2.5, NaN, Infinity, "2"])
+    assert.throws(() => personalReleaseVersion("3.17.1", "20261103", invalid));
+});
 test("stamping the root manifest is repeatable and preserves other fields", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "personal-release-"));
   t.after(() => rm(root, { recursive: true, force: true }));
