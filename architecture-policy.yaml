@@ -1232,6 +1232,19 @@ global:
   acceptedUpstreamSnapshot: scripts/architecture/upstream-snapshot.json
 
 exceptions:
+  - id: personal-native-context-existing-ui-edits
+    rule: unmanaged-new-file
+    paths:
+      - packages/ui/src/ToolCallBlocks/renderers/fallback.tsx
+      - packages/ui/src/ToolCallBlocks/resolveRenderer.ts
+      - packages/ui/src/i18n/locales/en-US.ts
+      - packages/ui/src/i18n/locales/zh-CN.ts
+    reason: 个人仓库与完整上游历史衔接时，这四个上游既有 UI 文件在旧 remote 基线中尚不存在；本地修改仅增加原生上下文工具的严格 display 展示、renderer 选择和双语文案，已通过源码类型检查及 8 组真实浏览器组件场景。原样上游 blob 仍单独记录，不能将本地内容登记为原样上游；接管整个遗留 UI 模块不在此次交付范围。
+  - id: personal-windows-window-background-existing-edit
+    rule: unmanaged-new-file
+    paths:
+      - packages/desktop/src/main/desktopWindowChrome.ts
+    reason: 保留用户此前已有的 Windows 启动黑边修复：上游既有 BrowserWindow 辅助文件仅将透明背景改为不透明白；旧个人 remote 基线未包含该上游文件，衔接完整历史时单独记录本地修改，不将其冒充原样上游。窗口生命周期、权限及依赖方向不变，不接管整个遗留 Desktop 模块。
   - id: session-features-attribution-header-edit
     rule: unmanaged-new-file
     paths: [ apps/zcode-cli/packages/adapters/src/model/runner-attribution.ts ]
