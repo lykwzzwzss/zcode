@@ -6,6 +6,10 @@ minor/patch。`pnpm version:personal` 只更新根 manifest，重复运行不叠
 workspace 包仍保留各自的版本体系。该日期后缀符合 SemVer 的 prerelease 语法，但个人 GitHub
 Release 显式发布为正式 Latest，不使用上游自动更新源。
 
+Windows PowerShell 构建入口：设置 `$env:ZCODE_ENV='production'`、
+`$env:ZCODE_PREVIEW_IDENTITY='0'`、`$env:ZCODE_AUTO_UPDATE='0'`，再运行
+`pnpm bundle:desktop -- --os win --arch x64`。不能省略生产环境设置，否则默认会生成 Preview。
+
 流程：完成源码与测试 → `pnpm version:personal` → 提交源码 → Windows x64 完整构建与安装包
 验证 → 本机安装并核对版本和内核 → 推送个人仓库 → 创建 `v版本号` Release。
 `--date YYYYMMDD` 仅用于复现指定构建日期。已发布的同名 tag/Release 不覆盖；一天多次正式
