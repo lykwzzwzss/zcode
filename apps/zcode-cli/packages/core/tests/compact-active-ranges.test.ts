@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CompactRangeInput } from "@zcode/contracts";
-import type { RuntimeMessageEntry } from "../src/agent/message-history.js";
+import { INTERRUPT_MARKER_SOURCE, type RuntimeMessageEntry } from "../src/agent/message-history.js";
 import { suggestCompactRanges } from "../src/native-context/contract.js";
 import { buildCompactNudgeEntry } from "../src/runtime/methods/compact-nudge.js";
 import { buildContextIndexEntry } from "../src/runtime/methods/context-index.js";
@@ -87,6 +87,25 @@ describe("Flash compact range suggestions", () => {
       }
     });
   }
+  it("does not list an interrupt marker as a user index entry", () => {
+    const runtime = { config: {} } as AgentRuntimeInternal;
+    const model = createTestRuntimeModel({
+      modelId: "deepseek-v4.1-flash",
+      contextWindow: 1_000_000,
+      generateText: async () => ({ text: "unused", finishReason: "stop", usage: {} }),
+    });
+    const marker: RuntimeMessageEntry = {
+      message: { role: "user", content: "[Request interrupted by user]" },
+      messageId: "marker_entry",
+      metadata: { source: INTERRUPT_MARKER_SOURCE },
+    };
+    const index = buildContextIndexEntry(runtime, [...entries, marker], model, [
+      { name: "CompactNow" },
+    ]);
+    expect(index?.kind).toBe("attachment");
+    const body = index?.kind === "attachment" ? index.content : "";
+    expect(body).not.toContain("marker_entry");
+  });
 });
 import {
   buildPostCompactRuntimeEntriesForRanges,
@@ -133,6 +152,14 @@ function reminderEntry(content: string): RuntimeMessageEntry {
     kind: "attachment",
     content,
     metadata: { source: "legacy_synthetic" },
+  };
+}
+
+function interruptMarkerEntry(messageId: string): RuntimeMessageEntry {
+  return {
+    message: { role: "user", content: "interrupted" },
+    messageId,
+    metadata: { source: INTERRUPT_MARKER_SOURCE },
   };
 }
 
@@ -294,6 +321,23 @@ describe("planCompactRanges", () => {
     expect(plannedIndices(entries, [range("summary-id", "summary-id")])).toEqual([
       [2, 2, "summary-id", "summary-id"],
     ]);
+  });
+
+  it("keeps an interrupt marker inside its round but never treats it as a range endpoint", () => {
+    const entries: RuntimeMessageEntry[] = [
+      messageEntry("system", "system prompt"),
+      messageEntry("assistant", "a1", "m1"),
+      interruptMarkerEntry("marker-id"),
+      messageEntry("user", "u1", "m2"),
+      messageEntry("assistant", "a2", "m3"),
+      messageEntry("user", "u2", "m4"),
+    ];
+    // marker 是模型不可见的隐藏 user 行：它随所在轮一起被折，但不能作为端点把整轮裁掉。
+    expect(plannedIndices(entries, [range("m1", "m2")])).toEqual([[1, 3, "m1", "m2"]]);
+    const plan = planCompactRanges(entries, [range("marker-id", "marker-id")]);
+    expect(plan.ok).toBe(false);
+    if (plan.ok) return;
+    expect(plan.reason).toBe("unknown_message_id");
   });
 
   it("rejects empty and oversized range lists", () => {

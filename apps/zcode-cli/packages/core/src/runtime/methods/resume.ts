@@ -194,7 +194,12 @@ export async function resumeFromStore(
   });
   const latestAssistant = [...timelineActiveMessages]
     .reverse()
-    .find((message) => message.info.role === "assistant");
+    // 时间线使用 assistant role，但不能成为目标校验、续跑或 idle 计时的正文锚点。
+    .find(
+      (message) =>
+        message.info.role === "assistant" &&
+        message.info.semantics?.providerVisibility !== "hidden",
+    );
   this.latestConversationMessageId = getLatestConversationMessageId(timelineActiveMessages);
   this.latestAssistantMessageId = latestAssistant?.info.id;
   this.latestAssistantTurnId = latestAssistant?.info.anchor?.turnId as TurnId | undefined;

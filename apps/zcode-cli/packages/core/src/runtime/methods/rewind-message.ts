@@ -721,7 +721,12 @@ async function rebuildConversationDerivedState(
   });
   const latestAssistant = [...timelineActiveMessages]
     .reverse()
-    .find((message) => message.info.role === "assistant");
+    // 与冷恢复同口径：UI 时间线不是模型轮，不能抢占回滚后的 assistant 锚点。
+    .find(
+      (message) =>
+        message.info.role === "assistant" &&
+        message.info.semantics?.providerVisibility !== "hidden",
+    );
   this.latestConversationMessageId = getLatestConversationMessageId(timelineActiveMessages);
   this.latestAssistantMessageId = latestAssistant?.info.id;
   this.latestAssistantTurnId = latestAssistant?.info.anchor?.turnId as TurnId | undefined;

@@ -1,4 +1,5 @@
 import {
+  COMPACT_NOW_TOOL_NAME,
   CompactNowOutputSchema,
   CompactStatusOutputSchema,
   DecompressContextOutputSchema,
@@ -561,7 +562,7 @@ export function createNativeContextDisplay(
   output: unknown,
 ): ToolResultDisplayPayload | undefined {
   let projection: Record<string, unknown>;
-  if (toolName === "CompactNow") {
+  if (toolName === COMPACT_NOW_TOOL_NAME) {
     const parsed = CompactNowOutputSchema.safeParse(output);
     if (!parsed.success) return undefined;
     projection = {

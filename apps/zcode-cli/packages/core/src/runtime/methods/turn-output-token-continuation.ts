@@ -108,6 +108,12 @@ export function commitTurnRequestEntries(
 ): void {
   if (entries.length === 0) return;
   runtime.messageHistory.addEntries(entries);
+  // 已提交压缩失败后，停止收尾仍会追加 interrupt marker 等新条目。
+  // 同步推进唯一重放输入，只接新条目；不能拿旧 turn 快照回写，否则会复活已折叠原文。
+  if (runtime.pendingCommittedCompactApply) {
+    const pending = runtime.pendingCommittedCompactApply;
+    runtime.pendingCommittedCompactApply = { ...pending, entries: [...pending.entries, ...entries] };
+  }
   appendTurnRequestEntries(state, entries);
 }
 

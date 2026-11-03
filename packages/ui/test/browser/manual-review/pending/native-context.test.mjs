@@ -57,6 +57,28 @@ for (const width of [390, 1200])
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
         await page.goto(`${origin}fixture?theme=${theme}&locale=${locale}`);
+        await page
+          .getByTestId("marker-office")
+          .getByText(
+            locale === "zh-CN"
+              ? "模型优化摘要已提交，正在保存"
+              : "Model optimization summary submitted, saving",
+          )
+          .waitFor();
+        await page
+          .getByTestId("marker-model_written-running")
+          .getByText(
+            locale === "zh-CN" ? "模型摘要已提交，正在保存" : "Model summary submitted, saving",
+          )
+          .waitFor();
+        await page
+          .getByTestId("marker-runtime_generated-success")
+          .getByText(locale === "zh-CN" ? "运行时摘要已完成" : "Runtime summary completed")
+          .waitFor();
+        await page
+          .getByTestId("marker-host_provided-success")
+          .getByText(locale === "zh-CN" ? "宿主摘要已完成" : "Host summary completed")
+          .waitFor();
         for (let i = 0; i < 9; i++) {
           const trigger = page.getByTestId(`case-${i}`).getByRole("button").first();
           await trigger.focus();

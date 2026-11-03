@@ -7,7 +7,11 @@ import {
 } from "../src/tools/context-memory.js";
 
 function range(index: number) {
-  return { startMessageId: `msg_start_${index}`, endMessageId: `msg_end_${index}` };
+  return {
+    startMessageId: `msg_start_${index}`,
+    endMessageId: `msg_end_${index}`,
+    summary: `summary ${index}`,
+  };
 }
 
 describe("CompactNow ranges contract", () => {
@@ -20,10 +24,11 @@ describe("CompactNow ranges contract", () => {
       expect(() => CompactNowInputSchema.parse({ ranges: [{ ...range(1), summary }] })).toThrow();
     }
   });
-  it("keeps the existing input shape when ranges are omitted", () => {
-    const parsed = CompactNowInputSchema.parse({ instructions: "keep tests" });
-    expect(parsed.ranges).toBeUndefined();
-    expect(parsed.reason).toBe("context_pressure");
+  it("requires ranges and a summary for each model tool call", () => {
+    expect(() => CompactNowInputSchema.parse({ instructions: "keep tests" })).toThrow();
+    expect(() =>
+      CompactNowInputSchema.parse({ ranges: [{ startMessageId: "m1", endMessageId: "m2" }] }),
+    ).toThrow();
   });
 
   it("accepts one or more explicit ranges", () => {
@@ -47,13 +52,16 @@ describe("CompactNow ranges contract", () => {
     ).toThrow();
   });
 
-  it("publishes ranges as an optional model-facing input field", () => {
+  it("publishes required ranges and summaries to the model", () => {
     const schema = CompactNowInputJsonSchema as {
       properties?: Record<string, unknown>;
       required?: string[];
     };
     expect(schema.properties?.ranges).toBeDefined();
-    expect(schema.required ?? []).not.toContain("ranges");
+    expect(schema.required ?? []).toContain("ranges");
+    expect(
+      (schema.properties?.ranges as { items: { required: string[] } }).items.required,
+    ).toContain("summary");
   });
 
   it("accepts the ranges_not_supported rejection output", () => {

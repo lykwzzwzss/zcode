@@ -8,10 +8,7 @@ import { highspeedMessageMetaSchema } from "../highspeed.js";
 import { executionOutputPreviewSchema } from "../execution-output-preview.js";
 import { timestampSchema } from "./core.js";
 import { conversationInputSourceSchema } from "./input-intent.js";
-import {
-  backgroundResultOriginMetaSchema,
-  workflowLaunchMetaSchema,
-} from "./workflow-row-meta.js";
+import { backgroundResultOriginMetaSchema, workflowLaunchMetaSchema } from "./workflow-row-meta.js";
 import { attachmentRefSchema } from "./attachment-ref.js";
 
 // RowBase。rowId：session 内单调、永不复用、事件日志的确定性纯函数。
@@ -351,6 +348,7 @@ export const timelineMarkerPayloadSchema = z.union([
   z.object({
     type: z.literal("compact"),
     origin: z.enum(["manual", "auto"]),
+    summaryOrigin: z.enum(["model_written", "runtime_generated", "host_provided"]).optional(),
     status: z.enum(["running", "success", "failed", "noop", "cancelled"]),
     tokensBefore: z.number().optional(),
     tokensAfter: z.number().optional(),

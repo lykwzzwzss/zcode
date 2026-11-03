@@ -49,6 +49,7 @@ import {
 import type { RegularTurnLoopState } from "./turn-loop-state.js";
 import { buildCompactNudgeEntry } from "./compact-nudge.js";
 import { buildContextIndexEntry } from "./context-index.js";
+import type { ModelCompactPreparationSlot } from "./compact-active-helpers.js";
 import { consumeSettledProjectMemoryRecall } from "../helpers/project-memory-recall.js";
 import { consumePendingProjectMemoryUpdate } from "../helpers/project-memory-dream.js";
 import { ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH } from "../../memory/project-memory-retrieval-branch.js";
@@ -63,6 +64,7 @@ export async function runRegularTurnLoop(
   this: AgentRuntimeInternal,
   state: RegularTurnLoopState,
 ): Promise<void> {
+  const compactPreparation: ModelCompactPreparationSlot = {};
   while (true) {
     throwIfTurnAborted(state.turnAbortSignal);
     refreshOffPeakTurnAfterTakeover(this, state);
@@ -158,7 +160,7 @@ export async function runRegularTurnLoop(
     // 模型通过 CompactNow 排队的折叠：必须在工具批次结束之后、下一次请求之前落地。
     // 与阈值触发的折叠共用同一条执行路径，只是不经过阈值判断。
     const pendingCompact = this.pendingCompactRequest;
-    let compactFeedback: RuntimeMessageEntry | undefined;
+    let compactFeedbackText: string | undefined;
     if (pendingCompact) {
       this.pendingCompactRequest = undefined;
       const requestedCompact = await this.compactActiveConversation(
@@ -170,6 +172,10 @@ export async function runRegularTurnLoop(
           // 选择性区间压缩：把模型点名的区间原样交给 compact 执行侧，
           // 是否支持由执行侧校验（不支持时必须整单拒绝，不能退化成前缀折叠）。
           ...(pendingCompact.ranges ? { ranges: pendingCompact.ranges } : {}),
+          modelCompact: {
+            slot: compactPreparation,
+            preparationToken: pendingCompact.preparationToken,
+          },
           // task_shift / user_request 是模型主动要求，不该在 telemetry 里记成阈值折叠；
           // context_pressure 才归 context_limit。trigger 仍用 Auto 以保留重试语义。
           compactReason:
@@ -190,10 +196,7 @@ export async function runRegularTurnLoop(
         recordCompactHistoryRound(state);
       } else {
         // 排队成功不等于已应用；拒绝原因必须回到模型，否则会反复提交错误端点或误以为已压缩。
-        compactFeedback = systemReminderAttachmentEntry(
-          "compact_result",
-          `Requested CompactNow was skipped: ${requestedCompact.displayText}`,
-        );
+        compactFeedbackText = `Requested CompactNow was skipped: ${requestedCompact.displayText}`;
       }
     }
 
@@ -226,7 +229,17 @@ export async function runRegularTurnLoop(
       recordCompactHistoryRound(state);
     }
     // 放在所有折叠之后，只影响本次请求；下一步清除，不能被复制到持久历史。
-    if (compactFeedback) appendTurnRequestEntries(state.turnRequestState, [compactFeedback]);
+    if (compactFeedbackText) {
+      // 自动折叠已经改变历史：拒绝事实仍要回传，但必须说明旧索引/旧边界已失效，
+      // 否则模型会照旧索引继续重试并反复失败。
+      const feedbackText =
+        autoCompactOutcome === "compacted"
+          ? `${compactFeedbackText} Automatic compaction has since changed the conversation history; that rejection referred to the pre-compaction context index. Use the refreshed context index and new persistent message ids before retrying.`
+          : compactFeedbackText;
+      appendTurnRequestEntries(state.turnRequestState, [
+        systemReminderAttachmentEntry("compact_result", feedbackText),
+      ]);
+    }
     // 增长提醒：放在自动折叠之后——刚折完水位已降，不该再催一次。
     // 子代理运行时没有 compactControlPort，催它调一个必然 rejected 的工具没有意义。
     if (this.config.taskType !== "subagent_child") {

@@ -41,6 +41,8 @@ export function getLatestConversationMessageId(
   // 旧 warn+全量回退掩盖了这个重复重放错误。活跃链的选择只由调用方负责。
   for (let index = activeMessages.length - 1; index >= 0; index--) {
     const message = activeMessages[index]!;
+    // 压缩时间线会物理追加在尾部；它不进模型历史，冷恢复不能让它抢占正文锚点。
+    if (message.info.semantics?.providerVisibility === "hidden") continue;
     // 与 live 一致：隐藏提醒不移动对话指针。
     if (isHiddenReminderMessage(message)) continue;
     if (message.info.role === "user" || message.info.role === "assistant") {

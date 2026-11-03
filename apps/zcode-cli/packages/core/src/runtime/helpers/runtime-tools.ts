@@ -201,6 +201,7 @@ function createRuntimeToolExecutor(
           compactControlPort: {
             requestCompact: (input: {
               instructions?: string;
+              preparationToken?: string;
               ranges?: readonly CompactRangeInput[];
               reason?: string;
             }) => {

@@ -6,8 +6,9 @@ import type {
   MessageId,
   MessageWithParts,
 } from "@zcode/contracts";
-import { invalidateRuntimeTokenUsage } from "./message-history.js";
+import { INTERRUPT_MARKER_SOURCE, invalidateRuntimeTokenUsage } from "./message-history.js";
 import { CoreErrorType, createCoreError } from "@zcode/contracts";
+import { syntheticSystemReminderAttachmentFromParts } from "./persisted-reminders/contract.js";
 
 export function compactActiveSessionMessages(
   messages: MessageWithParts[],
@@ -93,14 +94,18 @@ export function compactSessionMessages(
 
   // 根因：仅 warn 后返回全量历史让调用方误认为恢复成功，甚至重新超过上下文上限。
   // 纯重放层不具备修复损坏记录的能力；由现有恢复入口统一处理结构化错误。
-  throw createCoreError(
-    CoreErrorType.SessionCorrupted,
-    "Failed to restore compacted session history",
-    {
-      context: { reason: rewritten.failure, boundaryCount: boundaryIndexes.length },
-      retryable: false,
-    },
-  );
+  const failureMessage = "Failed to restore compacted session history";
+  const context = { reason: rewritten.failure, boundaryCount: boundaryIndexes.length };
+  const failure = createCoreError(CoreErrorType.SessionCorrupted, failureMessage, {
+    context,
+    retryable: false,
+  });
+  options.logger?.error(failureMessage, failure, {
+    ...context,
+    sessionId: messages[0]?.info.sessionID,
+    errorType: CoreErrorType.SessionCorrupted,
+  });
+  throw failure;
 }
 
 interface CompactBoundaryRecord {
@@ -172,7 +177,12 @@ function applyHierarchicalCompactRecord(
     if (
       !members.has(message.info.id) &&
       message.info.semantics?.providerVisibility !== "hidden" &&
-      message.info.semantics?.kind !== "system_reminder"
+      // 修复前的 hierarchy 没有收录 interrupt marker：当时 marker 的 live entry 丢掉了
+      // 持久化 messageId，buildContextFold 不会把它算作成员，但冷侧水合后它仍是可见的
+      // 普通 user 文本。只豁免这一种旧记录形状，不把 marker 注册成可恢复提醒。
+      message.info.semantics?.source !== INTERRUPT_MARKER_SOURCE &&
+      // todo 等附件在 live 中没有 messageId；必须复用水合的完整身份解析，不能按 kind 猜。
+      !(message.info.role === "user" && syntheticSystemReminderAttachmentFromParts(message.parts))
     )
       return undefined;
   }

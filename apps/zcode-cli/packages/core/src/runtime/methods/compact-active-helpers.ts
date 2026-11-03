@@ -1,5 +1,15 @@
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepSeekFlashModel } from "../../native-context/contract.js";
-import { type ModelToolContract } from "@zcode/contracts";
+import type { CompactRangeInput } from "@zcode/contracts";
+import { inputRoleOf } from "../helpers/provider-entry-origins.js";
+import {
+  COMPACT_MODEL_MAX_RANGES,
+  COMPACT_MODEL_MAX_TOTAL_SUMMARY_CHARS,
+  COMPACT_MODEL_MAX_RANGE_SUMMARY_CHARS,
+  COMPACT_MODEL_REQUIRED_GUIDANCE,
+  COMPACT_NOW_TOOL_NAME,
+  type ModelToolContract,
+} from "@zcode/contracts";
 import { buildToolSearchAnnouncement } from "../../tool/search/exposure.js";
 import { collectDiscoveredTools, compactDiscoveryMetadata } from "../../tool/search/history.js";
 import { collectRuntimeAgentListing } from "../helpers/agent-listing.js";
@@ -18,6 +28,7 @@ import {
   restateContextAfterCompact,
 } from "./context-refresh.js";
 import type { Model } from "../deps.js";
+import type { CompactPhase, CompactReason } from "../deps.js";
 import { systemReminderAttachmentEntry } from "../../agent/message-history.js";
 import {
   COMPACT_PROMPT_TOO_LONG_USER_MESSAGE,
@@ -53,6 +64,157 @@ import {
 } from "./turn-output-token-continuation.js";
 
 export const COMPACT_TOOL_USE_DENIAL_MESSAGE = "Tool use is not allowed during compaction";
+
+/** 仅由当前 turn 持有，退出或恢复时自然失效，不持久化。 */
+export interface ModelCompactPreparationSlot {
+  current?: {
+    token: string;
+    ranges: string;
+    prefixLength: number;
+    prefixHash: string;
+    requirements: string;
+  };
+  consecutivePreparations?: number;
+}
+const MAX_MODEL_COMPACT_PREPARATIONS = 3;
+const MAX_MODEL_COMPACT_REQUIREMENTS_CHARS = 24_000;
+export interface ModelCompactSource {
+  preparationToken?: string;
+  slot: ModelCompactPreparationSlot;
+}
+export interface CompactActiveOptions {
+  abortSignal?: AbortSignal;
+  compactContextTelemetry?: {
+    inputTokens: number;
+    policyContextWindowTokens: number;
+    thresholdTokens?: number;
+    tokenSource: "estimate" | "provider_usage";
+  };
+  autoCompactThreshold?: number;
+  compactReason?: CompactReason;
+  initialPromptTooLongCause?: unknown;
+  phase?: CompactPhase;
+  sourceCommandId?: string;
+  trigger?: CompactTrigger;
+  model?: Model;
+  agentListingTools?: readonly { name: string }[];
+  activeEntries?: readonly RuntimeMessageEntry[];
+  getContinuationTools?: () => readonly ModelToolContract[];
+  ranges?: readonly CompactRangeInput[];
+  modelCompact?: ModelCompactSource;
+}
+
+export function invalidModelCompactRanges(
+  ranges: readonly CompactRangeInput[] | undefined,
+): string | undefined {
+  if (
+    !ranges?.length ||
+    ranges.length > COMPACT_MODEL_MAX_RANGES ||
+    ranges.some(
+      (range) =>
+        typeof range.summary !== "string" ||
+        !range.summary.trim() ||
+        range.summary.length > COMPACT_MODEL_MAX_RANGE_SUMMARY_CHARS,
+    ) ||
+    ranges.reduce((sum, range) => sum + (range.summary?.length ?? 0), 0) >
+      COMPACT_MODEL_MAX_TOTAL_SUMMARY_CHARS
+  )
+    return COMPACT_MODEL_REQUIRED_GUIDANCE;
+  return undefined;
+}
+
+function compactHistoryHash(entries: readonly RuntimeMessageEntry[]): string {
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+}
+
+/** 已看过要求的凭据必须绑定原历史与同一批范围；不推断摘要是否语义符合要求。 */
+export function checkModelCompactPreparation(input: {
+  source: ModelCompactSource;
+  entries: readonly RuntimeMessageEntry[];
+  ranges: readonly CompactRangeInput[];
+  requirements: readonly string[];
+}): { accepted: true } | { accepted: false; message: string } {
+  const { source, entries, ranges, requirements } = input;
+  const rangeKey = JSON.stringify(
+    ranges.map(({ startMessageId, endMessageId }) => [startMessageId, endMessageId]),
+  );
+  const requirementKey = JSON.stringify(requirements);
+  const previous = source.slot.current;
+  // 只能追加重试自身的 assistant/CompactNow 工具活动；用户新输入或其他工具使准备失效。
+  const suffix = previous ? entries.slice(previous.prefixLength) : [];
+  // 工具钩子可能为每次 CompactNow 重复同一提醒；仅复用准备前模型已见的完整附件。
+  const knownToolHookContexts = new Set(
+    (previous ? entries.slice(0, previous.prefixLength) : [])
+      .filter(
+        (entry) => entry.kind === "attachment" && entry.metadata.source === "tool_hook_context",
+      )
+      .map((entry) => JSON.stringify(entry)),
+  );
+  const safeSuffix = suffix.every((entry) => {
+    if (inputRoleOf(entry) !== undefined) return false;
+    if (entry.kind === "attachment")
+      return entry.metadata.source === "tool_hook_context"
+        ? knownToolHookContexts.has(JSON.stringify(entry))
+        : [
+            "compact_result",
+            "compact_nudge",
+            "context_index",
+            "runtime_mode",
+            "output_style",
+            "silent_turn_reminder",
+          ].includes(entry.metadata.source);
+    if (entry.message.role === "assistant")
+      return (entry.message.toolCalls ?? []).every((call) => call.name === COMPACT_NOW_TOOL_NAME);
+    return entry.message.role === "tool" && entry.message.toolName === COMPACT_NOW_TOOL_NAME;
+  });
+  const valid =
+    previous !== undefined &&
+    source.preparationToken === previous.token &&
+    previous.ranges === rangeKey &&
+    previous.requirements === requirementKey &&
+    entries.length >= previous.prefixLength &&
+    safeSuffix &&
+    compactHistoryHash(entries.slice(0, previous.prefixLength)) === previous.prefixHash;
+  source.slot.current = undefined;
+  if (valid) {
+    source.slot.consecutivePreparations = 0;
+    return { accepted: true };
+  }
+  if (requirements.length === 0)
+    return {
+      accepted: false,
+      message:
+        "The preparation expired or requirements changed. Retry the same ranges with fresh summaries and no preparationToken.",
+    };
+  if (
+    requirements.reduce((sum, value) => sum + value.length, 0) >
+    MAX_MODEL_COMPACT_REQUIREMENTS_CHARS
+  )
+    return {
+      accepted: false,
+      message:
+        "PreCompact requirements exceed the preparation limit; adjust the hook before retrying.",
+    };
+  if ((source.slot.consecutivePreparations ?? 0) >= MAX_MODEL_COMPACT_PREPARATIONS)
+    return {
+      accepted: false,
+      message:
+        "PreCompact preparation limit reached for this turn. Resolve changing requirements or start a new turn.",
+    };
+  const token = randomUUID();
+  source.slot.consecutivePreparations = (source.slot.consecutivePreparations ?? 0) + 1;
+  source.slot.current = {
+    token,
+    ranges: rangeKey,
+    prefixLength: entries.length,
+    prefixHash: compactHistoryHash(entries),
+    requirements: requirementKey,
+  };
+  return {
+    accepted: false,
+    message: `PreCompact requires the following before writing summaries:\n${requirements.join("\n\n")}\nExact ranges [startMessageId, endMessageId]: ${rangeKey}\nRewrite every summary for those exact ranges and resubmit with preparationToken=${token}.`,
+  };
+}
 export const COMPACT_TOOL_USE_DENIAL_REASON = "compaction agent should only produce text summary";
 
 /** 健康 no-op 只有时间线终态，不产生摘要、边界或活跃历史写入。 */
@@ -136,6 +298,12 @@ export async function skipNonShrinkingCompact(
 }
 
 export interface CommittedCompactState {
+  /**
+   * 折叠后仍然保留的对话指针。只在它确实作为活跃消息留下的区间折叠里传：
+   * 此时尾部未选中的消息仍是冷恢复读到的最后一条，指针不能倒退到 summary。
+   * legacy 不传，保持原有的 summary 锚点。
+   */
+  anchorMessageId?: MessageId;
   entries: readonly RuntimeMessageEntry[];
   preserveCanonicalPrefix: boolean;
   readFileStateEntries: readonly ReadFileStateEntry[];
@@ -157,7 +325,7 @@ export function applyCommittedCompactState(
         )
       : recordable,
   );
-  runtime.latestConversationMessageId = input.summaryMessageId;
+  runtime.latestConversationMessageId = input.anchorMessageId ?? input.summaryMessageId;
   replaceReadFileStateAfterCompact(runtime.readFileState, input.readFileStateEntries);
   resetProjectMemoryRecall(runtime);
   runtime.lastCompactNudgeTokenCount = input.tokenCount;

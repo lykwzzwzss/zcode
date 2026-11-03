@@ -1,4 +1,5 @@
 import {
+  INTERRUPT_MARKER_SOURCE,
   isRuntimeAttachmentEntry,
   systemReminderAttachmentEntry,
   type RuntimeMessageEntry,
@@ -106,6 +107,9 @@ function isContextIndexEntry(
 ): entry is RuntimeMessageMessageEntry & { messageId: string } {
   // attachment 是 system reminder / 公告，不是可点名的对话原文。
   if (isRuntimeAttachmentEntry(entry)) return false;
+  // 打断标记是运行时注入的隐藏消息：它随所属轮次进折叠，但 range planner 不允许它
+  // 作为 CompactNow 端点，列进索引只会让模型选中一个必然被拒绝的 id。
+  if (entry.metadata?.source === INTERRUPT_MARKER_SOURCE) return false;
   // 没有持久化 id 的条目索引不了：不能用位置编号顶替，否则工具解析不到这条消息。
   if (!entry.messageId) return false;
   // 输出续写提示只属于单次请求，不在持久化对话里，点名它没有意义。

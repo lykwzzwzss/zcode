@@ -18,6 +18,7 @@ import {
   withUserStoppedToolResultContent,
 } from "../src/runtime/methods/interrupt-marker.js";
 import { createExternalTurnFaultError } from "../src/runtime/helpers/turn-errors.js";
+import type { AgentRuntimeInternal } from "../src/runtime/internal.js";
 
 describe("AgentRuntime turn cancellation", () => {
   // Bugfix 回归：用户主动取消（TurnCancelled）属于正常结束，事件流应以 TurnComplete(cancelled)
@@ -169,6 +170,14 @@ describe("AgentRuntime turn cancellation", () => {
           transcriptVisibility: "hidden",
         },
       });
+      // 活跃 entry 必须与持久化行共用 message id：否则区间折叠不会把 marker 算进 hierarchy，
+      // 冷恢复按成员重放时会判定损坏。
+      const liveMarker = (
+        runtime as unknown as AgentRuntimeInternal
+      ).messageHistory.toRuntimeEntries().find(
+        (entry) => entry.kind !== "attachment" && entry.metadata?.source === "interrupt_marker",
+      );
+      expect(liveMarker?.messageId).toBe(markerPart?.messageID);
 
       const resumed = build();
       await resumed.resumeFromStore();

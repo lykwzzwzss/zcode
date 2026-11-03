@@ -247,6 +247,10 @@ export async function recoverInterruptedCompactTimelines(
         preCompactTokenCount: part.preCompactTokenCount,
       };
       const payload = this.buildCompactTimelinePayload(timeline, {
+        // 恢复是中断操作的唯一终态来源：reason 既承载失败原因（如 api_error），
+        // 也可能承载 summary_origin 前缀；两种都必须原样带回持久化与内存，
+        // 不能只保留来源前缀，否则 UI/排障会丢失失败原因。
+        ...(part.reason !== undefined ? { reason: part.reason } : {}),
         attempt: part.attempt,
         boundaryId: boundary?.boundaryId,
         endedAt: Date.now(),
@@ -260,6 +264,7 @@ export async function recoverInterruptedCompactTimelines(
       });
       await this.persistCompactTimeline(payload, traceContext);
       Object.assign(part, {
+        reason: payload.reason,
         timelineStatus: payload.status,
         phase: payload.phase,
         compactReason: payload.compactReason,

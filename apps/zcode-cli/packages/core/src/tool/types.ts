@@ -229,6 +229,7 @@ export interface ToolExecutionContext {
 export interface CompactControlPort {
   requestCompact(input: {
     instructions?: string;
+    preparationToken?: string;
     ranges?: readonly CompactRangeInput[];
     reason?: string;
   }): {

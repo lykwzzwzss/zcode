@@ -1,4 +1,5 @@
 import type { RuntimeInputValidationIssue } from "./input-normalization.js";
+import { COMPACT_NOW_TOOL_NAME, COMPACT_MODEL_REQUIRED_GUIDANCE } from "@zcode/contracts";
 import {
   createCustomIssue,
   createInvalidFormatIssue,
@@ -15,10 +16,23 @@ export function createInitialInputValidationModelContent(
   runtimeIssues: readonly RuntimeInputValidationIssue[] | undefined,
 ): string {
   const issues = projectInitialModelValidationIssues(entry.inputSchema, jsonIssues, runtimeIssues);
+  // 只有 ranges/summary 契约相关错误才追加使用引导；instructions 类型错、未知参数等
+  // 普通字段错误保持原始反馈，避免每次参数问题都刷屏同一段长篇指南。
+  const guidance =
+    entry.metadata.name === COMPACT_NOW_TOOL_NAME && issues.some(issueTargetsCompactRangeContract)
+      ? `\n${COMPACT_MODEL_REQUIRED_GUIDANCE}`
+      : "";
   return `<tool_use_error>InputValidationError: ${formatToolInputValidationError(
     entry.metadata.name,
     issues,
-  )}</tool_use_error>`;
+  )}${guidance}</tool_use_error>`;
+}
+
+function issueTargetsCompactRangeContract(issue: ToolInputValidationIssue): boolean {
+  // invalid_union 的内层 issue 才携带真实字段路径，必须递归匹配。
+  if (issue.code === "invalid_union")
+    return issue.errors.some((group) => group.some(issueTargetsCompactRangeContract));
+  return issue.path.some((segment) => segment === "ranges" || segment === "summary");
 }
 
 export function formatToolInputValidationError(

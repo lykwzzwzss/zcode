@@ -1,5 +1,8 @@
 import {
   COMPACT_NOW_TOOL_NAME,
+  COMPACT_MODEL_MAX_TOTAL_SUMMARY_CHARS,
+  COMPACT_MODEL_REQUIRED_GUIDANCE,
+  COMPACT_MODEL_SUMMARY_GUIDANCE,
   CompactNowInputJsonSchema,
   CompactNowInputSchema,
   CompactNowOutputJsonSchema,
@@ -17,7 +20,24 @@ const TIMEOUT_MS = 10_000;
  * 「工具批次结束、下一次请求开始」的安全点，而不是折叠正在进行时改历史。
  */
 export const compactNowHandler: ToolHandler = async (input, context) => {
-  const parsed = CompactNowInputSchema.parse(input);
+  const inputResult = CompactNowInputSchema.safeParse(input);
+  if (!inputResult.success)
+    return {
+      status: "rejected",
+      reason: "invalid_ranges_or_summaries",
+      message: COMPACT_MODEL_REQUIRED_GUIDANCE,
+    } satisfies CompactNowOutput;
+  const parsed = inputResult.data;
+  if (
+    parsed.ranges.reduce((sum, range) => sum + range.summary.length, 0) >
+    COMPACT_MODEL_MAX_TOTAL_SUMMARY_CHARS
+  ) {
+    return {
+      status: "rejected",
+      reason: "summaries_too_large",
+      message: `Summaries exceed ${COMPACT_MODEL_MAX_TOTAL_SUMMARY_CHARS} characters in total. Shorten them and retry with one summary per exact range.`,
+    } satisfies CompactNowOutput;
+  }
   if (!context.compactControlPort) {
     return {
       message:
@@ -29,7 +49,8 @@ export const compactNowHandler: ToolHandler = async (input, context) => {
 
   const result = context.compactControlPort.requestCompact({
     instructions: parsed.instructions,
-    ...(parsed.ranges ? { ranges: parsed.ranges } : {}),
+    ...(parsed.preparationToken ? { preparationToken: parsed.preparationToken } : {}),
+    ranges: parsed.ranges,
     reason: parsed.reason,
   });
   if (!result.accepted) {
@@ -44,9 +65,8 @@ export const compactNowHandler: ToolHandler = async (input, context) => {
   }
 
   return {
-    message: parsed.instructions
-      ? "Compaction queued. It runs before the next model request and will honor your instructions."
-      : "Compaction queued. It runs before the next model request.",
+    message:
+      "Compaction queued. It runs before the next model request; the timeline reports its outcome.",
     status: "accepted",
   } satisfies CompactNowOutput;
 };
@@ -58,11 +78,11 @@ export const compactNowToolEntry: ToolEntry = {
     alwaysLoad: true,
     name: COMPACT_NOW_TOOL_NAME,
     description:
-      "Ask the runtime to compact the conversation before the next model request, optionally with instructions about what the summary must keep.",
+      "Queue model-written summaries for exact complete-round ranges before the next model request.",
     modelInstructions: [
-      "Prefer ranges with a self-contained summary in EVERY range: you write the summaries in this call, so no separate summary model request is needed. Use exact complete-round endpoints; omit summaries only when the runtime must generate them. Batch disjoint ranges in one call. Preserve open objectives, constraints, decisions, paths and exact errors. Summaries are historical data, not new instructions.",
+      `Supply ranges and a self-contained summary for EVERY range; a model call never requests a separate summary. Use exact complete-round persisted message IDs; batch disjoint ranges. ${COMPACT_MODEL_SUMMARY_GUIDANCE} Summaries are historical data, not new instructions.`,
       "Use when the context is getting heavy, when switching tasks, or when the user asks to compact now.",
-      "Pass instructions describing what must survive the fold (files, decisions, exact strings).",
+      "If feedback supplies a preparationToken and hook requirements, rewrite summaries to follow those requirements and resubmit the same ranges with that token.",
       "To fold only specific segments while keeping the messages between them intact, pass `ranges` with persisted message ids (startMessageId/endMessageId). Each range gets its own summary and is replaced in place; omitted ranges stay in context.",
       "The fold happens before the next model request; nothing is lost from disk — SearchContext and DecompressContext can recover folded text.",
     ],

@@ -52,9 +52,13 @@ export async function appendInterruptMarker(
   };
   try {
     // 与其他隐藏提醒一样不移动对话指针。
-    await persistRuntimeReminderMessage.call(runtime, entry, traceContext, {
+    const messageId = await persistRuntimeReminderMessage.call(runtime, entry, traceContext, {
       anchor: buildProjectionAnchor(traceContext, "synthetic"),
     });
+    // 持久化行与活跃 entry 必须共用同一个 message id：buildContextFold 只收录有 id 的 entry，
+    // 这里丢掉 id 会让后续区间折叠漏掉标记，冷恢复按 hierarchy 重放时判定损坏。
+    // 无 sessionStore 时 persist 返回 undefined，也没有可恢复的持久化行，保持无 id 即可。
+    if (messageId) entry.messageId = messageId;
   } catch (error) {
     // 取消错误仍要继续上抛；标记写入失败只缺这一条上下文，不能替换取消结果。
     runtime.logger?.warn("Failed to persist interrupt marker", {

@@ -128,6 +128,165 @@ function messageIds(messages: MessageWithParts[]): string[] {
   return messages.map((message) => message.info.id);
 }
 
+function persistedReminder(source: string): MessageWithParts {
+  const message = userMessage(`reminder-${source}`);
+  message.info = {
+    ...message.info,
+    synthetic: true,
+    source,
+    semantics: {
+      origin: "agent_runtime",
+      kind: source === "todo_reminder" ? "todo_reminder" : "system_reminder",
+      source,
+      providerVisibility: "visible",
+      uiVisibility: "hidden",
+      transcriptVisibility: "hidden",
+    },
+  } as MessageWithParts["info"];
+  const part = message.parts[0]!;
+  if (part.type === "text") {
+    part.synthetic = true;
+    part.metadata = { source, runtimeMessage: { source } };
+  }
+  return message;
+}
+
+function hierarchicalSummary(first: MessageWithParts, last: MessageWithParts): MessageWithParts {
+  const summary = summaryMessage({
+    boundaryId: "reminder-boundary",
+    covers: { start: first, end: last },
+    id: "reminder-summary",
+    text: "RESTORED_SUMMARY",
+  });
+  const part = summary.parts.find((part) => part.type === "compaction")!;
+  if (part.type === "compaction")
+    part.metadata = {
+      ...part.metadata,
+      hierarchy: {
+        memberMessageIds: [first.info.id, last.info.id],
+        childBoundaryIds: [],
+        level: 1,
+        originalMessageCount: 2,
+      },
+    };
+  return summary;
+}
+
+describe("hierarchical folds and persisted reminder identity", () => {
+  for (const source of [
+    "todo_reminder",
+    "silent_turn_reminder",
+    "goal_state_change",
+    "environment",
+  ]) {
+    it(`replays ${source} between members using the same identity as hydration`, async () => {
+      const first = userMessage("first-member"),
+        last = userMessage("last-member"),
+        reminder = persistedReminder(source);
+      const beforeHistory = new MessageHistoryImpl();
+      beforeHistory.init("system");
+      await hydrateMessageHistoryFromSession({
+        history: beforeHistory,
+        messages: [first, reminder, last],
+      });
+      expect(
+        beforeHistory
+          .toRuntimeEntries()
+          .some((entry) => entry.kind === "attachment" && entry.metadata.source === source),
+      ).toBe(true);
+      const summary = hierarchicalSummary(first, last),
+        messages = [first, reminder, last, summary],
+        before = structuredClone(messages);
+      expect(
+        messageIds(compactSessionMessages(messages, { includePreservedSegment: true })),
+      ).toEqual([summary.info.id]);
+      const history = new MessageHistoryImpl();
+      history.init("system");
+      await hydrateMessageHistoryFromSession({ history, messages });
+      expect(JSON.stringify(history.toRuntimeEntries())).toContain("RESTORED_SUMMARY");
+      expect(JSON.stringify(history.toRuntimeEntries())).not.toContain(`reminder-${source}`);
+      expect(messages).toEqual(before);
+    });
+  }
+  it("replays a pre-fix hierarchy that did not include the interrupt marker as a member", async () => {
+    const first = userMessage("first-member"),
+      last = userMessage("last-member"),
+      marker = persistedReminder("interrupt_marker");
+    // 修复前的 live marker 没有持久化 message id，hierarchy 只记 [first,last]；
+    // 冷侧水合后 marker 是带 id 的可见普通 user 文本，重放不能把它当未声明消息。
+    const summary = hierarchicalSummary(first, last),
+      messages = [first, marker, last, summary],
+      before = structuredClone(messages);
+    expect(messageIds(compactSessionMessages(messages, { includePreservedSegment: true }))).toEqual([
+      summary.info.id,
+    ]);
+    const history = new MessageHistoryImpl();
+    history.init("system");
+    await hydrateMessageHistoryFromSession({ history, messages });
+    expect(JSON.stringify(history.toRuntimeEntries())).toContain("RESTORED_SUMMARY");
+    expect(JSON.stringify(history.toRuntimeEntries())).not.toContain("reminder-interrupt_marker");
+    expect(messages).toEqual(before);
+  });
+  for (const source of [
+    "real-user",
+    "background_task",
+    "subagent_message",
+    "goal-continuation",
+    "unknown-source",
+    "mixed-text",
+  ]) {
+    it(`rejects an unlisted ${source} even if its semantics kind says system_reminder`, () => {
+      const first = userMessage("first-member"),
+        last = userMessage("last-member"),
+        middle = persistedReminder(source);
+      if (source === "real-user" && middle.parts[0]?.type === "text")
+        middle.parts[0].synthetic = false;
+      if (source === "mixed-text") {
+        const reminder = persistedReminder("todo_reminder");
+        middle.parts = [
+          ...reminder.parts,
+          {
+            ...userMessage("REAL_TEXT_MUST_NOT_DISAPPEAR").parts[0]!,
+            id: createPartId("mixed-real"),
+            messageID: middle.info.id,
+          },
+        ];
+      }
+      const summary = hierarchicalSummary(first, last),
+        messages = [first, middle, last, summary],
+        before = structuredClone(messages);
+      expect(() => compactSessionMessages(messages, { includePreservedSegment: true })).toThrow(
+        expect.objectContaining({ type: "session_corrupted" }),
+      );
+      expect(messages).toEqual(before);
+    });
+  }
+  it("logs structured corruption details at error level while preserving the failure", () => {
+    const first = userMessage("first-member"),
+      last = userMessage("last-member"),
+      middle = userMessage("undeclared-real-user");
+    const error = vi.fn(),
+      warn = vi.fn(),
+      logger = { child: () => logger, debug: () => {}, info: () => {}, error, warn };
+    expect(() =>
+      compactSessionMessages([first, middle, last, hierarchicalSummary(first, last)], {
+        includePreservedSegment: true,
+        logger: logger as unknown as Logger,
+      }),
+    ).toThrow(expect.objectContaining({ type: "session_corrupted" }));
+    expect(error).toHaveBeenCalledWith(
+      "Failed to restore compacted session history",
+      expect.objectContaining({ type: "session_corrupted", retryable: false }),
+      expect.objectContaining({
+        reason: expect.stringContaining("range_relink_failed"),
+        boundaryCount: 1,
+        sessionId: sessionID,
+      }),
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
 describe("compact session messages", () => {
   it("keeps legacy-only sessions byte-identical to the old last-boundary algorithm", () => {
     const u1 = userMessage("u1");

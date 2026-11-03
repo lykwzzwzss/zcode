@@ -1,14 +1,16 @@
-import type { CompactRangeInput, MessageId } from "@zcode/contracts";
+import {
+  COMPACT_MODEL_MAX_RANGES,
+  type CompactRangeInput,
+  type MessageId,
+} from "@zcode/contracts";
 import {
   countContextPrefixMessages,
+  INTERRUPT_MARKER_SOURCE,
   isRuntimeAttachmentEntry,
   type RuntimeMessageEntry,
 } from "../agent/message-history.js";
 import { groupByAssistantStartedRounds } from "../compact/rounds.js";
 import { estimateRuntimeEntryTokens } from "../runtime/helpers/compact-selection.js";
-
-/** 单次操作允许的最大区间数：上限来自 CompactRangeInput 的契约（max 16），这里再兜一层。 */
-const MAX_COMPACT_RANGES = 16;
 
 /** 规划后的区间，索引相对 activeEntries（不是 provider 投影）。 */
 export interface PlannedCompactRange {
@@ -29,6 +31,9 @@ function invalidRange(message: string): CompactRangePlan {
 
 function entryMessageId(entry: RuntimeMessageEntry | undefined): string | undefined {
   // attachment 没有对应的持久化消息行，不能作为区间端点；只映射真实的 message id。
+  // 中断标记是隐藏的 user 行：它需要进 hierarchy 成员（buildContextFold 用 entry.messageId），
+  // 但模型看不到它，不能作为用户/模型指定的区间端点。
+  if (entry?.metadata?.source === INTERRUPT_MARKER_SOURCE) return undefined;
   return entry && !isRuntimeAttachmentEntry(entry) ? entry.messageId : undefined;
 }
 
@@ -158,9 +163,9 @@ export function planCompactRanges(
   if (ranges.length === 0) {
     return invalidRange("No ranges were provided for selective compaction.");
   }
-  if (ranges.length > MAX_COMPACT_RANGES) {
+  if (ranges.length > COMPACT_MODEL_MAX_RANGES) {
     return invalidRange(
-      `At most ${MAX_COMPACT_RANGES} ranges can be compacted in one operation; received ${ranges.length}.`,
+      `At most ${COMPACT_MODEL_MAX_RANGES} ranges can be compacted in one operation; received ${ranges.length}.`,
     );
   }
   for (const range of ranges) {

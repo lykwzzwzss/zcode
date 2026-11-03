@@ -1,6 +1,8 @@
 import { toCompactCacheUsage } from "../../native-context/summary-policy.js";
 import {
   DECOMPRESS_CONTEXT_TOOL_NAME,
+  COMPACT_SUMMARY_ORIGIN_PREFIX,
+  CompactSummaryOrigin,
   HookEventName,
   SEARCH_CONTEXT_TOOL_NAME,
   type CompactBoundaryPayload,
@@ -62,6 +64,8 @@ import {
   logCommittedCompactFailure,
   persistCompactTimelineEvent,
   renderCompactHookTranscript,
+  checkModelCompactPreparation,
+  type ModelCompactSource,
 } from "./compact-active-helpers.js";
 import {
   buildCompactTimelinePayload,
@@ -140,6 +144,7 @@ export async function compactActiveConversationWithRanges(
     activeEntries?: readonly RuntimeMessageEntry[];
     getContinuationTools?: () => readonly ModelToolContract[];
     ranges?: readonly CompactRangeInput[];
+    modelCompact?: ModelCompactSource;
   },
 ): Promise<{
   displayText: string;
@@ -156,14 +161,18 @@ export async function compactActiveConversationWithRanges(
       selection: this.getSessionModelSelection(),
     });
   // 共用摘要模型解析：明确的目录校验失败才 warn 回退，目录/工厂内部异常继续上抛。
-  const compactModel = resolveCompactSummaryModel({
-    catalog: this.modelCatalogPort,
-    configured: this.config.compactSummaryModel,
-    createModel: (selection) => createRuntimeModel(this, { selection }),
-    fallbackModel: defaultCompactModel,
-    logContext: traceContextToLogContext(turnTraceContext),
-    logger: this.logger,
-  }).model;
+  const compactModel =
+    options.ranges?.length &&
+    options.ranges.every((range) => typeof range.summary === "string" && range.summary.trim())
+      ? defaultCompactModel
+      : resolveCompactSummaryModel({
+          catalog: this.modelCatalogPort,
+          configured: this.config.compactSummaryModel,
+          createModel: (selection) => createRuntimeModel(this, { selection }),
+          fallbackModel: defaultCompactModel,
+          logContext: traceContextToLogContext(turnTraceContext),
+          logger: this.logger,
+        }).model;
   const useMidConversationSystem = shouldUseMidConversationSystem(this.config, compactModel);
   // 窗口与收益按继续会话的模型计算，摘要请求仍使用摘要模型自己的投影。
   const continuationMcs = shouldUseMidConversationSystem(this.config, defaultCompactModel);
@@ -184,6 +193,7 @@ export async function compactActiveConversationWithRanges(
 
   const plan = planCompactRanges(activeEntries, options.ranges ?? []);
   if (!plan.ok) {
+    if (options.modelCompact) options.modelCompact.slot.current = undefined;
     // 规划失败不产生任何落盘内容，只把 timeline 收敛为 skipped，链保持不变。
     const payload = buildCompactTimelinePayload.call(this, compactTimeline, {
       endedAt: Date.now(),
@@ -256,6 +266,7 @@ export async function compactActiveConversationWithRanges(
     };
   };
   if (preCompactHookResult.blockRequested) {
+    if (options.modelCompact) options.modelCompact.slot.current = undefined;
     const blockedReason = preCompactHookResult.stopReason?.trim();
     return skipTimeline({
       displayText: blockedReason
@@ -265,6 +276,7 @@ export async function compactActiveConversationWithRanges(
   }
   const hostCompactionSummary = preCompactHookResult.compactionSummary?.trim();
   if (hostCompactionSummary !== undefined && plan.ranges.length > 1) {
+    if (options.modelCompact) options.modelCompact.slot.current = undefined;
     // 钩子只能给一份折叠正文；多区间需要 N 段独立摘要，硬套会把同一段摘要塞进每个区间。
     return skipTimeline({
       displayText:
@@ -276,13 +288,50 @@ export async function compactActiveConversationWithRanges(
     .map((context) => context.trim())
     .filter((context) => context.length > 0);
   const submittedSummaries = plan.ranges.every((range) => range.summary !== undefined);
-  if (submittedSummaries && hookInstructions.length > 0 && hostCompactionSummary === undefined) {
-    // 新的钩子要求出现在主模型写完摘要之后；不能假称既有正文已遵守这些要求。
+  if (
+    options.modelCompact &&
+    hostCompactionSummary === undefined &&
+    (hookInstructions.length > 0 || options.modelCompact.preparationToken !== undefined)
+  ) {
+    const prepared = checkModelCompactPreparation({
+      source: options.modelCompact,
+      entries: activeEntries,
+      ranges: plan.ranges,
+      requirements: hookInstructions,
+    });
+    if (!prepared.accepted)
+      return skipTimeline({
+        reason: "submitted_summary_requires_hook_instructions",
+        displayText: prepared.message,
+      });
+  }
+  if (
+    !options.modelCompact &&
+    submittedSummaries &&
+    hookInstructions.length > 0 &&
+    hostCompactionSummary === undefined
+  ) {
     return skipTimeline({
       reason: "submitted_summary_requires_hook_instructions",
       displayText: `PreCompact added new instructions. Resubmit summaries that follow them: ${hookInstructions.join("\n\n")}`,
     });
   }
+  if (
+    options.modelCompact &&
+    hookInstructions.length === 0 &&
+    !options.modelCompact.preparationToken
+  )
+    options.modelCompact.slot.current = undefined;
+  if (options.modelCompact && hostCompactionSummary !== undefined)
+    options.modelCompact.slot.current = undefined;
+  const summaryOrigin =
+    hostCompactionSummary !== undefined
+      ? CompactSummaryOrigin.HostProvided
+      : submittedSummaries
+        ? options.modelCompact
+          ? CompactSummaryOrigin.ModelWritten
+          : undefined
+        : CompactSummaryOrigin.RuntimeGenerated;
   const effectiveCustomInstructions =
     hookInstructions.length === 0
       ? customInstructions
@@ -294,6 +343,7 @@ export async function compactActiveConversationWithRanges(
     this,
     SessionEventType.CompactStarted,
     buildCompactTimelinePayload.call(this, compactTimeline, {
+      ...(summaryOrigin ? { reason: COMPACT_SUMMARY_ORIGIN_PREFIX + summaryOrigin } : {}),
       status: CompactTimelineStatus.Started,
     }),
     turnTraceContext,
@@ -307,7 +357,6 @@ export async function compactActiveConversationWithRanges(
       ? compactCandidates
       : this.getTools(defaultCompactModel);
     const registry = this.getToolRegistry();
-    const compactPrompt = buildCompactPrompt(effectiveCustomInstructions);
     const modelTraceContext = createChildTraceContext(turnTraceContext, {
       attributes: {
         model: `${compactModel.providerId}/${compactModel.modelId}`,
@@ -344,6 +393,9 @@ export async function compactActiveConversationWithRanges(
             ...activeEntries.slice(0, prefixCount),
             ...activeEntries.slice(range.startIndex, range.endIndex + 1),
           ];
+          // 走到这里说明本段没有宿主/模型摘要可用，必须由摘要模型生成；
+          // 直接生成说明，避免外层的 undefined 分支留下非空断言。
+          const compactPrompt = buildCompactPrompt(effectiveCustomInstructions);
           const prepared = prepareRuntimeProviderRequest(this, {
             model: compactModel,
             tools: compactCandidates,
@@ -583,8 +635,19 @@ export async function compactActiveConversationWithRanges(
     compactCommitted = true;
     const lastRecord = summaryRecords[summaryRecords.length - 1]!;
     const lastRange = plan.ranges[plan.ranges.length - 1]!;
+    // 区间折叠只替换选中的消息：尾部未选中的消息仍然活跃，冷恢复读到的最后一条就是它。
+    // 只有指针指向被折掉的原文时才退回 summary，避免 live/cold 锚点分叉。
+    const previousLatest = this.latestConversationMessageId;
+    const retainedAnchor =
+      previousLatest &&
+      postCompactEntries.some(
+        (entry) => entry.kind !== "attachment" && entry.messageId === previousLatest,
+      )
+        ? previousLatest
+        : undefined;
     // 提交后先同步更新 Runtime，再做可失败的事件 I/O：磁盘与活跃历史必须始终同向收敛。
     applyOrDeferCommittedCompactState(this, {
+      ...(retainedAnchor ? { anchorMessageId: retainedAnchor } : {}),
       entries: postCompactEntries,
       preserveCanonicalPrefix: options.activeEntries !== undefined,
       readFileStateEntries: fileRestore.readFileStateEntries,
@@ -605,6 +668,7 @@ export async function compactActiveConversationWithRanges(
       this,
       SessionEventType.CompactCompleted,
       buildCompactTimelinePayload.call(this, compactTimeline, {
+        ...(summaryOrigin ? { reason: COMPACT_SUMMARY_ORIGIN_PREFIX + summaryOrigin } : {}),
         boundaryId: lastRecord.boundary.boundaryId,
         endedAt: Date.now(),
         postCompactTokenCount: truePostCompactTokenCount,
@@ -642,6 +706,10 @@ export async function compactActiveConversationWithRanges(
     );
     // 提交后的后续步骤已全部成功，下一次请求不再需要重放这份提交。
     finalizeCommittedCompactApply(this);
+    if (options.modelCompact) {
+      options.modelCompact.slot.current = undefined;
+      options.modelCompact.slot.consecutivePreparations = 0;
+    }
 
     return {
       displayText: "Compacted",

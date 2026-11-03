@@ -244,9 +244,29 @@ interrupted；记录 `compact.post_commit.failed` 后向上暴露原错误。提
 以存储/重建结果为唯一事实，会清空重放输入。未写完的 started/retrying 时间线由既有 resume
 恢复入口根据 operationId 对应的持久化 boundary 收敛为 completed。PostCompact 观察的是已提交
 的活跃历史，返回的 additionalContext 在替换之后追加。
+停止收尾期间追加的已提交条目（尤其 interrupt marker）也必须追加到同一份待重放输入；
+下一轮重放只替换折叠前历史，不能覆盖提交后的新条目。冷恢复与 rewind 计算对话和 assistant
+锚点时排除 provider-hidden 时间线，区间压缩后立即恢复也必须保留尾部正文的锚点。
 回归覆盖：前缀/ranges 的提交前取消、提交期间取消、bundle 写失败、boundary 事件失败、
 完成时间线写失败、完成事件失败、自动压缩提交后错误终止当前轮、跨轮重放、后台消息不丢失、
 持续失败 fail-closed，以及失败后继续执行/冷恢复一致性与禁止重复摘要。
+
+#### 恢复终态、模型来源守卫与拒绝反馈（2026-11-03 修复）
+
+- 恢复保留原因：started/retrying 时间线收敛为 interrupted 或 completed 时，原 compaction part 的
+  `reason` 必须原样写入恢复后的内存 part 与持久化记录。`reason` 可能承载失败原因（如 `api_error`），
+  也可能承载 `summary_origin:*` 来源前缀；恢复不能只保留来源前缀而丢失失败原因。
+- 模型来源守卫终态：`modelCompact` 请求的 ranges 必须包含非空区间与摘要。形状不合法时守卫直接拒绝：
+  不调用摘要模型、不改活跃历史、不写 boundary，并写一条 `Skipped` 终态压缩时间线，
+  `reason = model_source_invalid_ranges_or_summaries`，供 UI 与诊断使用；不得静默返回 skipped。
+- 参数校验指南范围：CompactNow 输入校验失败时，只有错误路径命中 `ranges`/`summary` 契约才追加
+  「需要精确 startMessageId」的区间指南；`instructions`、`reason` 等无关字段错误只返回原始校验错误，
+  避免把模型引向无关修复。
+- 拒绝反馈的时效标注：CompactNow 拒绝（如 unknown message id）后若同一轮发生自动压缩，拒绝事实必须保留，
+  但反馈要注明自动压缩已改变历史、拒绝针对折叠前索引，重试前必须使用刷新后的上下文索引与持久化 message id。
+  该反馈只进入当前轮请求，不写入 messageHistory。
+- 回归覆盖：retrying→interrupted 与已提交→completed 均保留 reason；模型守卫写 Skipped 终态；
+  无关参数错误不追加区间指南；折叠后拒绝反馈带陈旧提示且不持久化。
 
 ### 1.8 清理和缓存失效
 

@@ -55,7 +55,7 @@ Hooks 的目标不是把业务逻辑散落到用户脚本里，而是在 agent l
 | `PostToolUse`        | tool 成功后、结果序列化给模型前               | 否                 | 可追加 context；P1 再支持替换输出 | 是，批次后附件；Hook stdin 获得完整 `tool_response` |
 | `PostToolUseFailure` | tool 失败后、错误返回模型前                   | 否                 | 可追加 recovery context           | 是，批次后附件                                      |
 | `Stop`               | turn 即将 complete 前                         | 是，可要求继续一轮 | 可追加 feedback context           | 是                                                  |
-| `PreCompact`         | 折叠请求发出前                                | 是，可取消本次折叠 | 可替换摘要正文、追加摘要指令      | 否；指令进入摘要请求                                |
+| `PreCompact`         | 折叠请求发出前                                | 是，可取消本次折叠 | 可替换摘要正文、追加摘要指令      | 运行时摘要进入 prompt；模型直写走当轮准备反馈 |
 | `PostCompact`        | 折叠结果落盘后                                | 否                 | 可追加下一轮提醒                  | 是，作为 `hook_context` 附件                       |
 
 实现状态：
@@ -183,9 +183,9 @@ P0 使用一个统一 JSON 输出：
   - `continue: true` 且带 `additionalContext` 表示把反馈注入下一轮模型请求。
   - `continue: true` 但没有 `additionalContext` 视为 no-op，避免空循环。
 - `PreCompact`
-  - `additionalContext`：与调用方 instructions 合并后写入摘要 prompt，并记录到 boundary 的
-    `customInstructions`，保证事后能还原这次折叠实际用了什么。
-  - `compactionSummary`：宿主直接采用该正文，跳过模型摘要请求（usage 记 0）。
+  - `additionalContext`：运行时生成摘要时与 instructions 合并写入摘要 prompt；模型直写时，先把完整要求与一次性凭据返回同一 turn，让模型看到要求后重写并提交。重提时重跑 hook，核对阻止、宿主摘要与要求是否改变；凭据绑定原历史和范围且一次有效。连续准备失败最多三次，成功提交或消费有效凭据后清零；要求超过 24,000 字符明确拒绝，不截断、不改写为事后提醒。取消或结束 turn 丢弃准备状态。
+  - 重提 CompactNow 产生的工具钩子附件，仅在与准备前模型已看到的附件完全一致时允许复用凭据；新的或变化的要求使凭据失效。
+  - `compactionSummary`：宿主直接采用该正文，跳过模型摘要请求；多范围时不能把一份正文套到每段，整单跳过。该来源标记为宿主，不伪造模型完成事件。
   - `continue: false` 或 `decision: "block"`：取消本次折叠，返回 `skipped`（不抛错），
     并落一条 skipped 的 compact 时间线。
 - `PostCompact`
@@ -231,7 +231,7 @@ Tool 执行路径：
 
 - deny/block > ask > allow > passthrough。
 - 多个 `updatedInput` 时按执行顺序应用“最后一个有效完整替代 input”。如果后续校验失败，归因为 hook contract violation，tool 不执行。
-- 工具 Hook 的多个 `additionalContext` 按 hook 顺序保留为多条，不拼接。生命周期 Hook（`SessionStart` / `UserPromptSubmit` / `Stop` / `PostCompact`）仍把多条合成一条 `hook_context`，每条带 `#n` 编号；`PreCompact` 的 additionalContext 走摘要指令，不生成附件。
+- 工具 Hook 的多个 `additionalContext` 按 hook 顺序保留为多条，不拼接。生命周期 Hook（`SessionStart` / `UserPromptSubmit` / `Stop` / `PostCompact`）仍把多条合成一条 `hook_context`，每条带 `#n` 编号；`PreCompact` 的 additionalContext 用于摘要准备，模型直写的准备反馈仅作用于当次请求。
 - 工具 Hook（`PreToolUse` / `PostToolUse` / `PostToolUseFailure`）的每条 context 写成
   `<Event>:<ToolName> hook additional context: <context>`，作为 `tool_hook_context` 附件排在这批
   tool result 之后、其他批次提示之前；按 tool result 顺序分组，同一工具 Pre 在前。tool_result 只放工具原文，
@@ -399,7 +399,7 @@ Phase 4：
 
 compact hooks：
 
-- `PreCompact additionalContext` 进入摘要请求与 boundary metadata。
+- `PreCompact additionalContext` 进入运行时摘要请求；模型直写则在受限准备后进入同 turn 重提，不产生摘要请求。
 - `PreCompact compactionSummary` 跳过模型摘要请求。
 - `PreCompact continue:false` 返回 skipped，不产生 boundary。
 - `PostCompact additionalContext` 作为 `hook_context` 进入下一轮请求。

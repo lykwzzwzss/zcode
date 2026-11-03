@@ -267,6 +267,9 @@ export const CompactStatusOutputJsonSchema = toToolJsonSchema(CompactStatusOutpu
  * 执行期会先把端点向外扩到 assistant 开头/结尾的整个 round，所以这里只要求
  * 指向真实存在的消息；顺序、重叠、活跃分支等校验在真正执行折叠前统一做。
  */
+export const COMPACT_MODEL_MAX_RANGES = 16;
+export const COMPACT_MODEL_MAX_TOTAL_SUMMARY_CHARS = 48_000;
+export const COMPACT_MODEL_MAX_RANGE_SUMMARY_CHARS = 24_000;
 export const CompactRangeSchema = z
   .object({
     startMessageId: z
@@ -283,15 +286,30 @@ export const CompactRangeSchema = z
       .string()
       .trim()
       .min(1)
-      .max(24_000)
+      .max(COMPACT_MODEL_MAX_RANGE_SUMMARY_CHARS)
       .optional()
       .describe(
-        "Self-contained summary written by you; supply for EVERY range to avoid an extra model request. Preserve user constraints, open objectives, decisions and exact identifiers. Endpoints must match complete assistant-round boundaries; do not overlap ranges. Keep it concise, usually 2K-4K tokens, and do not include analysis.",
+        "Optional caller-supplied summary for this range. Model CompactNow requires one per range; internal runtime-generated compaction may omit it.",
       ),
   })
   .strict();
 
 export type CompactRangeInput = z.infer<typeof CompactRangeSchema>;
+
+export const COMPACT_MODEL_REQUIRED_GUIDANCE =
+  'CompactNow requires ranges with an exact startMessageId, endMessageId and nonempty summary for each range. Use persisted IDs from the context index, and retry in this turn: {"ranges":[{"startMessageId":"<first persisted ID>","endMessageId":"<last persisted ID>","summary":"<self-contained summary>"}]}. Do not use instructions instead of summaries.';
+export const COMPACT_MODEL_SUMMARY_GUIDANCE =
+  "Write only facts needed to continue, not analysis; preserve unfinished work as unfinished. Size each summary to its range without filling the limit. Preserve objectives, constraints, decisions, paths and exact errors; all summaries total at most 48,000 characters.";
+export const CompactModelRangeSchema = CompactRangeSchema.extend({
+  summary: z
+    .string()
+    .trim()
+    .min(1)
+    .max(COMPACT_MODEL_MAX_RANGE_SUMMARY_CHARS)
+    .describe(
+      `Your self-contained summary for this exact complete-round range. ${COMPACT_MODEL_SUMMARY_GUIDANCE}`,
+    ),
+});
 
 export const CompactNowInputSchema = z
   .object({
@@ -299,7 +317,15 @@ export const CompactNowInputSchema = z
       .string()
       .max(4000)
       .optional()
-      .describe("What the next summary must preserve or emphasize."),
+      .describe("Optional supplementary context; it cannot replace the summaries you write."),
+    preparationToken: z
+      .string()
+      .min(1)
+      .max(128)
+      .optional()
+      .describe(
+        "One-use token returned after PreCompact provides additional requirements; resubmit the same ranges with newly written summaries following those requirements.",
+      ),
     reason: z
       .enum(["context_pressure", "task_shift", "user_request"])
       .optional()
@@ -307,12 +333,11 @@ export const CompactNowInputSchema = z
     // 选择性区间压缩：显式给出要折的若干段，段与段之间的消息原样保留。
     // 执行侧已接通（P2）：每段独立摘要、原位替换；端点必须是持久化消息 id。
     ranges: z
-      .array(CompactRangeSchema)
+      .array(CompactModelRangeSchema)
       .min(1)
-      .max(16)
-      .optional()
+      .max(COMPACT_MODEL_MAX_RANGES)
       .describe(
-        "Explicit ranges to fold instead of the default oldest-prefix fold. Persisted summary ids may be folded recursively. Each range is summarized independently and messages outside it stay in context. Endpoints are persisted message ids; ranges expand to assistant-round boundaries and overlapping expansions are rejected or adjacent ranges merged.",
+        "Required complete-round ranges with one self-contained summary per range. Use persisted message ids, including older summary ids for recursive folding; unselected messages remain active. No separate summary model call is made.",
       ),
   })
   .strict();

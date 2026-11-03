@@ -166,6 +166,7 @@ export interface AgentRuntimeInternal
    */
   pendingCompactRequest?: {
     instructions?: string;
+    preparationToken?: string;
     ranges?: readonly CompactRangeInput[];
     reason?: string;
   };

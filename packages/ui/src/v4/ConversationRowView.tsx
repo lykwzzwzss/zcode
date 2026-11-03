@@ -2001,6 +2001,15 @@ const TimelineMarkerRowView = memo(function TimelineMarkerRowView({
         const running = marker.status === "running";
         const automaticOptimization = isOfficeMode && marker.origin === "auto";
         const scope = automaticOptimization ? "chat.contextOptimization" : "chat.contextCompaction";
+        if (marker.summaryOrigin && (running || marker.status === "success")) {
+          return {
+            icon: MARKER_ARCHIVE_ICON,
+            label: intl.formatMessage({
+              id: `${scope}.${marker.summaryOrigin}.${running ? "started" : "completed"}`,
+            }),
+            running,
+          };
+        }
         const statusMessage =
           marker.status === "running"
             ? "started"

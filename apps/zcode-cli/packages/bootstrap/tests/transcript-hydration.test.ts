@@ -1100,6 +1100,38 @@ describe("transcript→event 合成", () => {
     });
   });
 
+  it.each(["model_written", "runtime_generated", "host_provided"] as const)(
+    "replays the %s summary origin into its compact marker",
+    (origin) => {
+      const compactHost = assistantMessageWithParts(
+        "a-origin",
+        "u-origin",
+        [
+          {
+            id: "timeline-origin" as never,
+            sessionID: "s1" as never,
+            messageID: "a-origin" as never,
+            type: "timeline",
+            timelineType: "context_compaction",
+            display: "separator",
+            status: CompactTimelineStatus.Completed,
+            operationId: "op-origin",
+            trigger: CompactTrigger.Auto,
+            reason: `summary_origin:${origin}`,
+          },
+        ],
+        1001,
+      );
+      const { events, projection } = reduce([userMessage("u-origin", "input", 1000), compactHost]);
+      expect(
+        events.find((event) => event.type === SessionEventType.CompactCompleted)?.payload,
+      ).toMatchObject({ reason: `summary_origin:${origin}` });
+      expect(
+        projection.getSnapshot().rows.window.find((row) => row.kind === "timelineMarker"),
+      ).toMatchObject({ marker: { type: "compact", summaryOrigin: origin, status: "success" } });
+    },
+  );
+
   it("cold compact ranges 共享 operationId 时取最后一段的边界与 tailStart", () => {
     // ranges-v1（选择性区间压缩）一次操作会写 N 条共享 operationId 的 durable part
     // （每段 boundary 不同）+ 1 条 Completed timeline part（boundary 取最后一段）。

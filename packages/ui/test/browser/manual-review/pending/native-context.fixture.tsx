@@ -4,6 +4,8 @@ import { TooltipProvider } from "@/components/ui/tooltip.js";
 import { ToolPresentation } from "@/ToolCallBlocks/ToolPresentation.js";
 import { toolCallRowToLegacyNode } from "@/v4/toolCallRowAdapter.js";
 import { toolCallRowSchema } from "@zcode/shared/zcode-protocol-v4";
+import { ConversationRowView } from "@/v4/ConversationRowView.js";
+import { StoreContext } from "@/store/StoreProvider.js";
 import "@/styles.css";
 
 const query = new URLSearchParams(location.search);
@@ -106,6 +108,57 @@ createRoot(document.getElementById("root")!).render(
   <ZCodeIntlProvider initialLocale={query.get("locale") === "en-US" ? "en-US" : "zh-CN"}>
     <TooltipProvider>
       <main className="space-y-4 bg-background p-4 text-foreground">
+        <StoreContext.Provider
+          value={
+            { getState: () => ({ interfaceMode: "office" }), subscribe: () => () => {} } as never
+          }
+        >
+          <section data-testid="marker-office">
+            <ConversationRowView
+              row={
+                {
+                  rowId: 490,
+                  turnId: "t",
+                  createdAt: 1,
+                  createdAtSeq: 1,
+                  kind: "timelineMarker",
+                  lane: "assistantWork",
+                  marker: {
+                    type: "compact",
+                    origin: "auto",
+                    status: "running",
+                    summaryOrigin: "model_written",
+                  },
+                } as never
+              }
+              context={{} as never}
+            />
+          </section>
+        </StoreContext.Provider>
+        {(["model_written", "runtime_generated", "host_provided"] as const).flatMap(
+          (summaryOrigin, index) =>
+            (["running", "success"] as const).map((status, statusIndex) => (
+              <section
+                key={`${summaryOrigin}-${status}`}
+                data-testid={`marker-${summaryOrigin}-${status}`}
+              >
+                <ConversationRowView
+                  row={
+                    {
+                      rowId: 500 + index * 2 + statusIndex,
+                      turnId: "t",
+                      createdAt: 1,
+                      createdAtSeq: 1,
+                      kind: "timelineMarker",
+                      lane: "assistantWork",
+                      marker: { type: "compact", origin: "auto", status, summaryOrigin },
+                    } as never
+                  }
+                  context={{} as never}
+                />
+              </section>
+            )),
+        )}
         {examples.map((example, index) => {
           const row = toolCallRowSchema.parse({
             rowId: index + 1,

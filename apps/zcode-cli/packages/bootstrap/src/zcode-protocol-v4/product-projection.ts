@@ -57,6 +57,7 @@ import type {
 } from "@zcode/contracts";
 import {
   DEFERRED_TOOL_CALL_NAME,
+  compactSummaryOriginFromReason,
   AMEND_WORKFLOW_TOOL_NAME,
   CREATE_WORKFLOW_TOOL_NAME,
   CoreErrorType,
@@ -5066,10 +5067,12 @@ export class ProductProjection {
     }
     const tokensAfter =
       payload.truePostCompactTokenCount ?? payload.postCompactTokenCount ?? prev?.tokensAfter;
+    const summaryOrigin = compactSummaryOriginFromReason(payload.reason) ?? prev?.summaryOrigin;
     const marker: TimelineMarkerPayload = {
       type: "compact",
       origin: prev?.origin ?? mapCompactMarkerOrigin(payload.trigger),
       status,
+      ...(summaryOrigin ? { summaryOrigin } : {}),
       // 终态事件才带 token 计数；upsert 时保留已知值（retry 不清零）。
       ...(payload.preCompactTokenCount !== undefined || prev?.tokensBefore !== undefined
         ? { tokensBefore: payload.preCompactTokenCount ?? prev?.tokensBefore }

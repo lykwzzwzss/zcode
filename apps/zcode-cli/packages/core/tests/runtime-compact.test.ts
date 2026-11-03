@@ -2495,6 +2495,8 @@ describe("AgentRuntime manual compact", () => {
       timelineStatus: CompactTimelineStatus.Retrying,
       timelineDisplay: CompactTimelineDisplay.Separator,
       preCompactTokenCount: 123,
+      // 进程在 retry 间隔退出时，恢复必须把失败原因带回终态，不能只保留来源前缀。
+      reason: "api_error",
       attempt: 2,
       maxAttempts: 3,
       time: {
@@ -2547,6 +2549,174 @@ describe("AgentRuntime manual compact", () => {
     expect(
       recoveredTimeline?.type === "compaction" ? recoveredTimeline.maxAttempts : undefined,
     ).toBe(3);
+    expect(recoveredTimeline?.type === "compaction" ? recoveredTimeline.reason : undefined).toBe(
+      "api_error",
+    );
+    expect(resumedEvent?.payload).toMatchObject({
+      recoveredCompactTimelineCount: 1,
+    });
+  });
+
+  it("recovers a committed compact timeline as completed and keeps its recorded reason", async () => {
+    const sessionId = createSessionId("runtime-compact-resume-committed");
+    const workingDirectory = "/tmp/zcode-runtime-compact-resume-committed";
+    const store = createRecordingSessionStore();
+    const firstRuntime = createTestAgentRuntime(
+      sessionId,
+      {
+        systemPrompt: "You are a compact committed recovery test agent.",
+        workingDirectory,
+      },
+      {
+        eventStore: createTestSessionEventStore(),
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText() {
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+        sessionStore: store,
+      },
+    );
+
+    await firstRuntime.executeTurn("prompt before the committed compact");
+    const parentMessageId = (await store.messages({ sessionID: sessionId })).at(-1)?.info.id;
+    const operationId = "cmp_resume_committed";
+    const timelineMessageId = createMessageId("compact-resume-committed-message");
+    const summaryMessageId = createMessageId("compact-resume-committed-summary");
+    const summaryCreated = 1_700_000_000_000;
+    const compactBoundary: CompactBoundaryPayload = {
+      boundaryId: "compact_resume_committed_boundary",
+      compactReason: CompactReason.ContextLimit,
+      keptMessageCount: 1,
+      lastSummarizedMessageId: parentMessageId ?? timelineMessageId,
+      phase: CompactPhase.PreRequest,
+      postCompactTokenCount: 20,
+      preCompactTokenCount: 123,
+      summarizedMessageCount: 1,
+      summaryMessageIds: [summaryMessageId],
+      summarySource: "model",
+      traceId: createTraceId(),
+      trigger: CompactTrigger.Auto,
+    };
+
+    await store.saveMessage({
+      agent: "zcode-agent",
+      id: summaryMessageId,
+      mode: "build",
+      modelID: "compact-test-model" as never,
+      parentID: parentMessageId ?? summaryMessageId,
+      path: { cwd: workingDirectory, root: workingDirectory },
+      providerID: "compact-test-provider" as never,
+      role: "user",
+      sessionID: sessionId,
+      summary: { body: "committed summary", diffs: [], title: "Compact summary" },
+      time: { created: summaryCreated },
+    });
+    await store.savePart({
+      id: createPartId("compact-resume-committed-summary-text"),
+      messageID: summaryMessageId,
+      sessionID: sessionId,
+      synthetic: true,
+      text: "Summary after committed compact",
+      type: "text",
+    });
+    await store.savePart({
+      auto: true,
+      compactBoundary,
+      id: createPartId("compact-resume-committed-summary-boundary"),
+      messageID: summaryMessageId,
+      operationId,
+      sessionID: sessionId,
+      trigger: CompactTrigger.Auto,
+      type: "compaction",
+    });
+    await store.saveMessage({
+      agent: "zcode-agent",
+      finish: CompactTimelineStatus.Completed,
+      id: timelineMessageId,
+      mode: "build",
+      modelID: "compact-test-model" as never,
+      parentID: summaryMessageId,
+      path: { cwd: workingDirectory, root: workingDirectory },
+      providerID: "compact-test-provider" as never,
+      role: "assistant",
+      sessionID: sessionId,
+      time: { created: summaryCreated + 1 },
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    });
+    await store.savePart({
+      id: createPartId("compact-resume-committed-part"),
+      messageID: timelineMessageId,
+      operationId,
+      preCompactTokenCount: 123,
+      reason: "summary_origin:model_written",
+      sessionID: sessionId,
+      timelineDisplay: CompactTimelineDisplay.Separator,
+      timelineStatus: CompactTimelineStatus.Started,
+      time: { start: summaryCreated + 1 },
+      trigger: CompactTrigger.Auto,
+      type: "compaction",
+    });
+
+    const eventStore = createTestSessionEventStore();
+    const resumedRuntime = createTestAgentRuntime(
+      sessionId,
+      {
+        systemPrompt: "You are a compact committed recovery test agent.",
+        workingDirectory: "/tmp/unused-before-committed-resume",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText() {
+              return {
+                finishReason: "stop",
+                text: "normal response after resume",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+        sessionStore: store,
+      },
+    );
+
+    await resumedRuntime.resumeFromStore();
+
+    const recoveredTimeline = (await store.messages({ sessionID: sessionId }))
+      .find((message) => message.info.id === timelineMessageId)
+      ?.parts.find((part) => part.type === "compaction" && part.operationId === operationId);
+    const resumedEvent = (await eventStore.getEvents(sessionId)).find(
+      (event) => event.type === SessionEventType.SessionResumed,
+    );
+
+    expect(
+      recoveredTimeline?.type === "compaction" ? recoveredTimeline.timelineStatus : undefined,
+    ).toBe(CompactTimelineStatus.Completed);
+    expect(recoveredTimeline?.type === "compaction" ? recoveredTimeline.reason : undefined).toBe(
+      "summary_origin:model_written",
+    );
+    expect(recoveredTimeline?.type === "compaction" ? recoveredTimeline.boundaryId : undefined).toBe(
+      compactBoundary.boundaryId,
+    );
+    expect(
+      recoveredTimeline?.type === "compaction" ? recoveredTimeline.summaryMessageId : undefined,
+    ).toBe(summaryMessageId);
+    expect(recoveredTimeline?.type === "compaction" ? recoveredTimeline.replace : undefined).toBe(
+      true,
+    );
     expect(resumedEvent?.payload).toMatchObject({
       recoveredCompactTimelineCount: 1,
     });
@@ -6925,6 +7095,246 @@ function createRecordingSessionStore(
 }
 
 describe("compact commit cancellation and failure recovery", () => {
+  it.each(["missing ranges", "missing summary"])(
+    "returns %s validation to the model and succeeds on the same turn",
+    async (missing) => {
+      const sessionId = createSessionId();
+      const store = createRecordingSessionStore();
+      const requests: string[] = [];
+      let active = false,
+        stage = 0,
+        compactCalls = 0;
+      let selectedId = "";
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        { systemPrompt: "Keep constraints.", compact: { enabled: false } },
+        {
+          sessionStore: store,
+          eventStore: createTestSessionEventStore(),
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request, observation) {
+                if (observation.invocationContext?.metadata?.querySource === "compact")
+                  compactCalls++;
+                const text = request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n");
+                if (!active)
+                  return { text: "seed answer", finishReason: "stop", usage: { totalTokens: 2 } };
+                requests.push(text);
+                stage++;
+                if (stage <= 2) {
+                  const input =
+                    stage === 1
+                      ? missing === "missing ranges"
+                        ? { instructions: "keep constraints" }
+                        : { ranges: [{ startMessageId: selectedId, endMessageId: selectedId }] }
+                      : {
+                          ranges: [
+                            {
+                              startMessageId: selectedId,
+                              endMessageId: selectedId,
+                              summary: "CORRECTED_SUMMARY",
+                            },
+                          ],
+                        };
+                  return {
+                    text: "",
+                    finishReason: "tool-calls",
+                    usage: { totalTokens: 2 },
+                    toolCalls: [{ id: createToolCallId(), name: "CompactNow", input }],
+                  };
+                }
+                return { text: "done", finishReason: "stop", usage: { totalTokens: 2 } };
+              },
+            }),
+          ),
+        },
+      );
+      await runtime.executeTurn("OLD_VALIDATION_CONTENT ".repeat(1000));
+      await runtime.executeTurn("second seed");
+      const internal = runtime as unknown as AgentRuntimeInternal;
+      selectedId = internal.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .find(
+          (entry) =>
+            entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+        )!.messageId!;
+      active = true;
+      await runtime.executeTurn("continue and compact");
+      expect(compactCalls).toBe(0);
+      expect(requests).toHaveLength(3);
+      expect(requests[1]).toContain("InputValidationError");
+      expect(requests[1]).toContain("CompactNow requires ranges");
+      expect(requests[2]).toContain("CORRECTED_SUMMARY");
+      expect(requests[2]).not.toContain("OLD_VALIDATION_CONTENT");
+      expect(
+        store.savedParts.filter((part) => part.type === "compaction" && part.compactBoundary),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("does not append the compact range guide for unrelated CompactNow argument errors", async () => {
+    const sessionId = createSessionId();
+    const store = createRecordingSessionStore();
+    const requests: string[] = [];
+    let active = false;
+    let stage = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "Keep constraints.", compact: { enabled: false } },
+      {
+        sessionStore: store,
+        eventStore: createTestSessionEventStore(),
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const text = request.messages
+                .map((message) => providerContentToText(message.content))
+                .join("\n");
+              if (!active) {
+                return { text: "seed answer", finishReason: "stop", usage: { totalTokens: 2 } };
+              }
+              requests.push(text);
+              stage++;
+              if (stage === 1) {
+                return {
+                  text: "",
+                  finishReason: "tool-calls",
+                  usage: { totalTokens: 2 },
+                  toolCalls: [
+                    {
+                      id: createToolCallId(),
+                      name: "CompactNow",
+                      input: {
+                        ranges: [
+                          {
+                            startMessageId: "missing-first",
+                            endMessageId: "missing-last",
+                            summary: "cannot apply",
+                          },
+                        ],
+                        reason: "not_a_compact_reason",
+                      },
+                    },
+                  ],
+                };
+              }
+              return { text: "done", finishReason: "stop", usage: { totalTokens: 2 } };
+            },
+          }),
+        ),
+      },
+    );
+    await runtime.executeTurn("seed");
+    active = true;
+    await runtime.executeTurn("continue");
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toContain("InputValidationError");
+    expect(requests[1]).not.toContain("CompactNow requires ranges");
+  });
+
+  it("uses one preparation with repeated PreCompact and PostToolUse requirements", async () => {
+    const sessionId = createSessionId();
+    const store = createRecordingSessionStore();
+    const requests: string[] = [];
+    let active = false,
+      generated = 0,
+      compactCalls = 0;
+    let selectedId = "";
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "Keep constraints.", compact: { enabled: false } },
+      {
+        sessionStore: store,
+        eventStore: createTestSessionEventStore(),
+        hookRunner: createInMemoryHookRunner({
+          hooks: [
+            {
+              event: HookEventName.PostToolUse,
+              callback: async () => ({
+                hookSpecificOutput: {
+                  hookEventName: HookEventName.PostToolUse,
+                  additionalContext: "Keep the same tool hook constraint",
+                },
+              }),
+            },
+          ],
+        }),
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request, observation) {
+              if (observation.invocationContext?.metadata?.querySource === "compact")
+                compactCalls++;
+              const text = request.messages
+                .map((message) => providerContentToText(message.content))
+                .join("\n");
+              if (!active)
+                return { text: "seed answer", finishReason: "stop", usage: { totalTokens: 2 } };
+              requests.push(text);
+              generated++;
+              if (generated <= 2) {
+                const token =
+                  generated === 2 ? text.match(/preparationToken=([0-9a-f-]+)/i)?.[1] : undefined;
+                if (generated === 2 && !token)
+                  throw new Error("preparation token missing from next request");
+                return {
+                  text: "",
+                  finishReason: "tool-calls",
+                  usage: { totalTokens: 2 },
+                  toolCalls: [
+                    {
+                      id: createToolCallId(),
+                      name: "CompactNow",
+                      input: {
+                        ranges: [
+                          {
+                            startMessageId: selectedId,
+                            endMessageId: selectedId,
+                            summary:
+                              generated === 1
+                                ? "first summary"
+                                : "FINAL_PREPARED_SUMMARY with required error",
+                          },
+                        ],
+                        ...(token ? { preparationToken: token } : {}),
+                      },
+                    },
+                  ],
+                };
+              }
+              return { text: "done", finishReason: "stop", usage: { totalTokens: 2 } };
+            },
+          }),
+        ),
+      },
+    );
+    await runtime.executeTurn("LONG_ORIGINAL_CONTENT ".repeat(1000));
+    await runtime.executeTurn("second seed");
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    selectedId = internal.messageHistory
+      .borrowReadOnlyRuntimeEntries()
+      .find(
+        (entry) => entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+      )!.messageId!;
+    const hook = vi.spyOn(internal, "runPreCompactHooks").mockResolvedValue({
+      additionalContexts: ["Preserve required error"],
+      blockRequested: false,
+    } as never);
+    active = true;
+    await runtime.executeTurn("continue and compact");
+    expect(hook).toHaveBeenCalledTimes(2);
+    expect(compactCalls).toBe(0);
+    expect(requests).toHaveLength(3);
+    expect(requests[1]).toContain("Preserve required error");
+    expect(requests[2]).toContain("FINAL_PREPARED_SUMMARY");
+    expect(requests[2]).not.toContain("LONG_ORIGINAL_CONTENT");
+    expect(
+      store.savedParts.filter((part) => part.type === "compaction" && part.compactBoundary),
+    ).toHaveLength(1);
+  });
+
   it("returns a queued CompactNow rejection to the next model step without persisting stale feedback", async () => {
     const sessionId = createSessionId();
     const store = createRecordingSessionStore();
@@ -6991,6 +7401,108 @@ describe("compact commit cancellation and failure recovery", () => {
     ).toBe(false);
     await runtime.executeTurn("next user turn");
     expect(requests.at(-1)).not.toContain("Unknown message id(s)");
+  });
+
+  it("marks a compact rejection as stale after automatic compaction changed the history", async () => {
+    const sessionId = createSessionId();
+    const store = createRecordingSessionStore();
+    const eventStore = createTestSessionEventStore();
+    const requests: string[] = [];
+    const longPrompt = "old context ".repeat(80);
+    let normalResponses = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        compact: { bufferTokens: 10, contextWindow: 120, summaryReserveTokens: 0 },
+        maxOutputTokens: 1,
+        systemPrompt: "Keep the user's original constraints.",
+      },
+      {
+        eventStore,
+        sessionStore: store,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              if (
+                providerContentToText(request.messages.at(-1)?.content).includes(
+                  "create a detailed summary",
+                )
+              ) {
+                return {
+                  finishReason: "stop",
+                  text: "<summary>AUTO_COMPACT_FEEDBACK_SUMMARY</summary>",
+                  usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+                };
+              }
+              requests.push(
+                request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n"),
+              );
+              normalResponses++;
+              if (normalResponses === 1) {
+                return {
+                  finishReason: "stop",
+                  text: "normal response 1",
+                  usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 },
+                };
+              }
+              if (normalResponses === 2) {
+                return {
+                  finishReason: "tool-calls",
+                  text: "",
+                  usage: { inputTokens: 115, outputTokens: 1, totalTokens: 116 },
+                  toolCalls: [
+                    {
+                      id: createToolCallId(),
+                      name: "CompactNow",
+                      input: {
+                        ranges: [
+                          {
+                            startMessageId: "missing-first",
+                            endMessageId: "missing-last",
+                            summary: "cannot apply",
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                };
+              }
+              return {
+                finishReason: "stop",
+                text: "normal response 3",
+                usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 },
+              };
+            },
+          }),
+        ),
+      },
+    );
+
+    await runtime.executeTurn(longPrompt);
+    const result = await runtime.executeTurn("compact after this tool call");
+
+    const events = await eventStore.getEvents(sessionId);
+    const postCompactRequest = requests.at(-1);
+    expect(result.response).toBe("normal response 3");
+    expect(requests).toHaveLength(3);
+    expect(postCompactRequest).toContain("Unknown message id(s)");
+    expect(postCompactRequest).toContain(
+      "Automatic compaction has since changed the conversation history",
+    );
+    expect(postCompactRequest).toContain("AUTO_COMPACT_FEEDBACK_SUMMARY");
+    // 自动折叠发生在工具批次之后：当前 turn 的 user 消息可被折进摘要，
+    // 但 compact_result 反馈与 CompactNow 的执行结果必须仍在本次请求里。
+    expect(postCompactRequest).toContain("Compaction queued");
+    expect(postCompactRequest).not.toContain(longPrompt);
+    expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(true);
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    expect(
+      internal.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .some((entry) => entry.metadata?.source === "compact_result"),
+    ).toBe(false);
   });
 
   const modes = ["prefix", "ranges"] as const;
@@ -7137,6 +7649,72 @@ describe("compact commit cancellation and failure recovery", () => {
     expect(test.requests.at(-1)).toContain("DIRECT_SUMMARY_KEEP_CONSTRAINT");
     expect(test.requests.at(-1)).not.toContain(oldRequest);
   });
+
+  it.each([false, true])(
+    "successful model compaction clears prior failed preparation count (host=%s)",
+    async (host) => {
+      const test = await fixture(undefined, oldRequest.repeat(1000));
+      const id = test.internal.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .find(
+          (entry) =>
+            entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+        )!.messageId!;
+      vi.spyOn(test.internal, "runPreCompactHooks").mockResolvedValue({
+        additionalContexts: [],
+        blockRequested: false,
+        ...(host ? { compactionSummary: "HOST_SUMMARY" } : {}),
+      } as never);
+      const slot = { consecutivePreparations: 3 };
+      const result = await test.internal.compactActiveConversation(
+        undefined,
+        createRootTraceContext({ sessionId: test.sessionId }),
+        [],
+        {
+          modelCompact: { slot },
+          ranges: [{ startMessageId: id, endMessageId: id, summary: "MODEL_SUMMARY" }],
+        },
+      );
+      expect(result.outcome).toBe("compacted");
+      expect(slot.consecutivePreparations).toBe(0);
+      expect(test.summaryCount()).toBe(0);
+    },
+  );
+
+  it.each([undefined, [], [{ startMessageId: "m", endMessageId: "m" }]])(
+    "model-source guard cannot fall through to runtime summary for %j",
+    async (ranges) => {
+      const test = await fixture(undefined, oldRequest.repeat(1000));
+      const before = liveText(test.internal);
+      const result = await test.internal.compactActiveConversation(
+        undefined,
+        createRootTraceContext({ sessionId: test.sessionId }),
+        [],
+        { modelCompact: { slot: {} }, ranges },
+      );
+      expect(result.outcome).toBe("skipped");
+      expect(result.displayText).toContain("CompactNow requires ranges");
+      expect(test.summaryCount()).toBe(0);
+      expect(liveText(test.internal)).toBe(before);
+      expect(
+        test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+      ).toBe(false);
+      // 内部模型来源守卫必须在拒绝时写终态 Skipped，而不是静默返回 skipped。
+      const completed = (await test.eventStore.getEvents(test.sessionId)).find(
+        (event) => event.type === SessionEventType.CompactCompleted,
+      );
+      expect(completed?.payload).toMatchObject({
+        reason: "model_source_invalid_ranges_or_summaries",
+        status: CompactTimelineStatus.Skipped,
+      });
+      expect(
+        test.store.savedParts.some(
+          (part) =>
+            part.type === "compaction" && part.timelineStatus === CompactTimelineStatus.Skipped,
+        ),
+      ).toBe(true);
+    },
+  );
 
   it("does not commit a submitted summary when reminders make the final context larger", async () => {
     const test = await fixture();
@@ -7449,6 +8027,7 @@ describe("compact commit cancellation and failure recovery", () => {
           readAt: new Date(),
           isPartialView: false,
         });
+        const latestBefore = test.internal.latestConversationMessageId;
 
         await expect(test.invoke(mode)).rejects.toBe(failure);
 
@@ -7461,7 +8040,11 @@ describe("compact commit cancellation and failure recovery", () => {
           (part) => part.type === "compaction" && part.compactBoundary,
         );
         expect(boundaryParts).toHaveLength(1);
-        expect(test.internal.latestConversationMessageId).toBe(boundaryParts[0]?.messageID);
+        // 区间折叠只替换选中的首条 user 消息，尾部未选中消息仍是冷恢复锚点；
+        // prefix 折叠会替换整个 preserved segment，锚点才是新边界摘要。
+        expect(test.internal.latestConversationMessageId).toBe(
+          mode === "ranges" ? latestBefore : boundaryParts[0]?.messageID,
+        );
         expect(
           test.store.savedParts.some(
             (part) =>
@@ -7474,8 +8057,13 @@ describe("compact commit cancellation and failure recovery", () => {
         await test.runtime.executeTurn("continue after committed failure");
         expect(test.requests.at(-1)).toContain(summaryMarker);
         expect(test.requests.at(-1)).not.toContain(oldRequest);
+        const latestAfterFollowUp = test.internal.latestConversationMessageId;
         const resumed = test.createRuntime();
         await resumed.resumeFromStore();
+        // 冷恢复从持久化时间线重算锚点：必须停在 live 最新可见消息上，不能被规则提醒或摘要抢占。
+        expect((resumed as unknown as AgentRuntimeInternal).latestConversationMessageId).toBe(
+          latestAfterFollowUp,
+        );
         await resumed.executeTurn("continue after cold recovery");
         expect(test.requests.at(-1)).toContain(summaryMarker);
         expect(test.requests.at(-1)).not.toContain(oldRequest);

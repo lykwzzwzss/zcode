@@ -89,6 +89,22 @@ export const CompactFailureReason = {
 
 export type CompactFailureReason = (typeof CompactFailureReason)[keyof typeof CompactFailureReason];
 
+/** 兼容既有 strict timeline 的 reason，来源不是新的生命周期状态。 */
+export const COMPACT_SUMMARY_ORIGIN_PREFIX = "summary_origin:";
+export const CompactSummaryOrigin = {
+  ModelWritten: "model_written",
+  RuntimeGenerated: "runtime_generated",
+  HostProvided: "host_provided",
+} as const;
+export type CompactSummaryOrigin = (typeof CompactSummaryOrigin)[keyof typeof CompactSummaryOrigin];
+export function compactSummaryOriginFromReason(
+  reason: string | undefined,
+): CompactSummaryOrigin | undefined {
+  if (!reason?.startsWith(COMPACT_SUMMARY_ORIGIN_PREFIX)) return undefined;
+  const value = reason.slice(COMPACT_SUMMARY_ORIGIN_PREFIX.length);
+  return Object.values(CompactSummaryOrigin).find((origin) => origin === value);
+}
+
 const compactTimelinePayloadInputSchema = z
   .object({
     operationId: z.string().min(1),

@@ -86,15 +86,16 @@ export function buildCompactNudgeEntry(
             ? "上下文压力偏高"
             : "增长提醒"
       }）。`,
-      flash
-        ? "已消费且不再需要逐字查看的完整区间，可在一次 CompactNow 中批量提交 ranges[].summary：直接写精简摘要，保留未完成目标、约束、文件、决策和精确字符串，避免额外摘要请求。不要重写仍在使用的最近内容。"
-        : level === "emergency"
-          ? "立即调用 CompactNow 折叠一次，并在 instructions 里写死必须保留的文件、决策与精确字符串。"
-          : "如果后续工作不再依赖早期细节，调用 CompactNow 主动折叠一次，并在 instructions 里写明必须保留的文件、决策与精确字符串。",
+      "对已消费的完整区间调用 CompactNow：每段必须提交 ranges[].summary，按原文内容控制长度，保留未完成目标、约束、文件、决策和精确错误；单段最多 24000 字符，整批最多 48000 字符。不要折叠仍在使用的最近内容。",
       ...suggestions.map(
         (range) =>
           `完整区间建议 ${range.startMessageId}..${range.endMessageId}（约 ${Math.round(range.estimatedTokens / 1000)}k tokens，较近的已完成大块优先；仍需使用则保留）。`,
       ),
+      ...(suggestions.length
+        ? [
+            `调用示例（请替换摘要内容）：${JSON.stringify({ ranges: suggestions.slice(0, 2).map((range) => ({ startMessageId: range.startMessageId, endMessageId: range.endMessageId, summary: "请填写本段摘要" })), reason: "context_pressure" })}`,
+          ]
+        : []),
       ...(tools.some((tool) => tool.name === SEARCH_CONTEXT_TOOL_NAME)
         ? ["SearchContext 可以检索被折叠的原文。"]
         : []),

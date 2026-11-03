@@ -223,6 +223,7 @@ export interface AgentRuntimeTurnMethods {
       activeEntries?: readonly RuntimeMessageEntry[];
       getContinuationTools?: () => readonly ModelToolContract[];
       ranges?: readonly CompactRangeInput[];
+      modelCompact?: import("./methods/compact-active-helpers.js").ModelCompactSource;
     },
   ): Promise<{
     displayText: string;

@@ -1,9 +1,9 @@
 import {
   DECOMPRESS_CONTEXT_TOOL_NAME,
+  COMPACT_SUMMARY_ORIGIN_PREFIX,
+  CompactSummaryOrigin,
   HookEventName,
   SEARCH_CONTEXT_TOOL_NAME,
-  type CompactRangeInput,
-  type ModelToolContract,
 } from "@zcode/contracts";
 import { buildContextFold } from "../../native-context/contract.js";
 import {
@@ -12,8 +12,6 @@ import {
   shouldUseMidConversationSystem,
 } from "../helpers/runtime-provider-request-messages.js";
 import {
-  CompactPhase,
-  CompactReason,
   CompactTrigger,
   CompactTimelineStatus,
   SessionEventType,
@@ -25,7 +23,7 @@ import {
   buildCompactSummaryMessage,
   buildManualCompactBoundary,
 } from "../deps.js";
-import type { Model, SessionEvent, TraceContext } from "../deps.js";
+import type { SessionEvent, TraceContext } from "../deps.js";
 import {
   defaultCompactPhaseForTrigger,
   defaultCompactReasonForTrigger,
@@ -68,6 +66,7 @@ import {
   logCommittedCompactFailure,
   persistCompactTimelineEvent,
   renderCompactHookTranscript,
+  invalidModelCompactRanges,
 } from "./compact-active-helpers.js";
 import { runCompactSummaryModelRequest } from "./compact-summary-model-request.js";
 import { compactActiveConversationWithRanges } from "./compact-active-ranges.js";
@@ -84,35 +83,18 @@ import {
   capCompactSummaryMaxOutputTokens,
   splitRetainedSummaries,
 } from "../../native-context/summary-policy.js";
-import { prepareCompactReminders } from "./compact-active-helpers.js";
+import { prepareCompactReminders, type CompactActiveOptions } from "./compact-active-helpers.js";
 
 const AUTO_COMPACT_MAX_ATTEMPTS = 3;
+// 模型入口守卫的稳定跳过原因码：timeline 终态需要机器可读原因，不能依赖展示文案。
+const MODEL_SOURCE_GUARD_SKIP_REASON = "model_source_invalid_ranges_or_summaries";
 
 export async function compactActiveConversation(
   this: AgentRuntimeInternal,
   customInstructions: string | undefined,
   turnTraceContext: TraceContext,
   events: SessionEvent[],
-  options: {
-    abortSignal?: AbortSignal;
-    compactContextTelemetry?: {
-      inputTokens: number;
-      policyContextWindowTokens: number;
-      thresholdTokens?: number;
-      tokenSource: "estimate" | "provider_usage";
-    };
-    autoCompactThreshold?: number;
-    compactReason?: CompactReason;
-    initialPromptTooLongCause?: unknown;
-    phase?: CompactPhase;
-    sourceCommandId?: string;
-    trigger?: CompactTrigger;
-    model?: Model;
-    agentListingTools?: readonly { name: string }[];
-    activeEntries?: readonly RuntimeMessageEntry[];
-    getContinuationTools?: () => readonly ModelToolContract[];
-    ranges?: readonly CompactRangeInput[];
-  } = {},
+  options: CompactActiveOptions = {},
 ): Promise<{
   displayText: string;
   entries: readonly RuntimeMessageEntry[];
@@ -163,26 +145,7 @@ async function compactActiveConversationImpl(
   customInstructions: string | undefined,
   turnTraceContext: TraceContext,
   events: SessionEvent[],
-  options: {
-    abortSignal?: AbortSignal;
-    compactContextTelemetry?: {
-      inputTokens: number;
-      policyContextWindowTokens: number;
-      thresholdTokens?: number;
-      tokenSource: "estimate" | "provider_usage";
-    };
-    autoCompactThreshold?: number;
-    compactReason?: CompactReason;
-    initialPromptTooLongCause?: unknown;
-    phase?: CompactPhase;
-    sourceCommandId?: string;
-    trigger?: CompactTrigger;
-    model?: Model;
-    agentListingTools?: readonly { name: string }[];
-    activeEntries?: readonly RuntimeMessageEntry[];
-    getContinuationTools?: () => readonly ModelToolContract[];
-    ranges?: readonly CompactRangeInput[];
-  } = {},
+  options: CompactActiveOptions = {},
 ): Promise<{
   displayText: string;
   entries: readonly RuntimeMessageEntry[];
@@ -190,6 +153,43 @@ async function compactActiveConversationImpl(
   tokenCount: number;
 }> {
   throwIfTurnAborted(options.abortSignal);
+  const trigger = options.trigger ?? CompactTrigger.Manual;
+  const phase = options.phase ?? defaultCompactPhaseForTrigger(trigger);
+  const compactReason = options.compactReason ?? defaultCompactReasonForTrigger(trigger);
+  // 模型入口不得因漏范围或摘要掉进 legacy 独立摘要路径；其它入口不受该守卫影响。
+  if (options.modelCompact) {
+    const invalidModelRequest = invalidModelCompactRanges(options.ranges);
+    if (invalidModelRequest) {
+      options.modelCompact.slot.current = undefined;
+      const entries = options.activeEntries ?? this.messageHistory.borrowReadOnlyRuntimeEntries();
+      // 与 ranges/legacy 的 Skipped 口径一致：窗口属于继续会话的模型，不是外部摘要模型。
+      const preCompactTokenCount = estimateRuntimeEntryTokens(entries, {
+        useMidConversationSystem: options.model
+          ? shouldUseMidConversationSystem(this.config, options.model)
+          : false,
+      });
+      // 拒绝也发生在压缩执行器内，必须留下 skipped 终态；不生成摘要、不修改活跃历史。
+      return finishSkippedCompact(
+        this,
+        {
+          operationId: `cmp_${crypto.randomUUID()}`,
+          messageId: createMessageId(),
+          partId: createPartId(),
+          trigger,
+          phase,
+          compactReason,
+          ...(options.sourceCommandId ? { sourceCommandId: options.sourceCommandId } : {}),
+          startedAt: Date.now(),
+          preCompactTokenCount,
+        },
+        entries,
+        turnTraceContext,
+        events,
+        invalidModelRequest,
+        MODEL_SOURCE_GUARD_SKIP_REASON,
+      );
+    }
+  }
   // 选择性区间压缩走独立执行器：legacy「折叠最旧前缀」路径完全不动，
   // 只有显式带 ranges 的请求才进入；不带 ranges 时行为与旧版本逐字节一致。
   if (options.ranges && options.ranges.length > 0) {
@@ -201,9 +201,6 @@ async function compactActiveConversationImpl(
       options,
     );
   }
-  const trigger = options.trigger ?? CompactTrigger.Manual;
-  const phase = options.phase ?? defaultCompactPhaseForTrigger(trigger);
-  const compactReason = options.compactReason ?? defaultCompactReasonForTrigger(trigger);
   const defaultCompactModel =
     options.model ??
     createRuntimeModel(this, {
@@ -323,6 +320,11 @@ async function compactActiveConversationImpl(
   }
 
   const compactStartedPayload = this.buildCompactTimelinePayload(compactTimeline, {
+    reason:
+      COMPACT_SUMMARY_ORIGIN_PREFIX +
+      (hostCompactionSummary !== undefined
+        ? CompactSummaryOrigin.HostProvided
+        : CompactSummaryOrigin.RuntimeGenerated),
     ...(maxAttempts > 1 ? { attempt, maxAttempts } : {}),
     status: CompactTimelineStatus.Started,
   });
@@ -769,6 +771,11 @@ async function compactActiveConversationImpl(
       events.push(compactBoundaryEvent);
 
       const compactCompletedPayload = this.buildCompactTimelinePayload(compactTimeline, {
+        reason:
+          COMPACT_SUMMARY_ORIGIN_PREFIX +
+          (hostCompactionSummary !== undefined
+            ? CompactSummaryOrigin.HostProvided
+            : CompactSummaryOrigin.RuntimeGenerated),
         ...(maxAttempts > 1 ? { attempt, maxAttempts } : {}),
         boundaryId: compactBoundary.boundaryId,
         endedAt: Date.now(),

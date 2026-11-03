@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createSqliteSessionStore } from "../packages/adapters/src/storage/index.js";
 import {
   createMessageId,
@@ -18,6 +21,8 @@ import { createTestSessionEventStore } from "../packages/core/tests/test-event-s
 import { archivePartText } from "../packages/adapters/src/native-context/archive-text.js";
 import { resolvePluginSystemPrompts } from "../packages/adapters/src/plugins/system-prompts.js";
 import { applyPluginSystemPrompts } from "../packages/core/src/runtime/methods/context.js";
+import { planCompactRanges } from "../packages/core/src/runtime/methods/compact-active-ranges.js";
+import type { AgentRuntimeInternal } from "../packages/core/src/runtime/internal.js";
 
 async function fixture() {
   const store = await createSqliteSessionStore({ dbPath: ":memory:" }),
@@ -89,6 +94,266 @@ async function fixture() {
 }
 
 describe("native context review regressions", () => {
+  it("retains conversation and assistant anchors when reopening immediately after a ranges fold", async () => {
+    const f = await fixture();
+    const modelFactory = createTestModelFactory({
+      async generateText() {
+        return { text: "synthetic answer", finishReason: "stop", usage: { totalTokens: 2 } };
+      },
+    });
+    const makeRuntime = () =>
+      createTestAgentRuntime(
+        f.sessionId,
+        { workingDirectory: process.cwd(), systemPrompt: "Synthetic review.", modelStreaming: "off", compact: { enabled: false } },
+        { sessionStore: f.store, eventStore: createTestSessionEventStore(), modelFactory },
+      );
+    try {
+      const runtime = makeRuntime();
+      const live = runtime as unknown as AgentRuntimeInternal;
+      for (const text of ["SYNTHETIC_ORIGINAL ".repeat(400), "second turn", "third turn"])
+        await runtime.executeTurn(text);
+      const first = live.messageHistory.borrowReadOnlyRuntimeEntries().find(
+        (entry) => entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+      )!;
+      const before = {
+        conversation: live.latestConversationMessageId,
+        assistant: live.latestAssistantMessageId,
+        turn: live.latestAssistantTurnId,
+      };
+      const result = await live.compactActiveConversation(undefined, createRootTraceContext({ sessionId: f.sessionId }), [], {
+        trigger: CompactTrigger.Auto,
+        ranges: [{ startMessageId: first.messageId!, endMessageId: first.messageId!, summary: "Concise synthetic summary" }],
+      });
+      expect(result.outcome).toBe("compacted");
+      const recovered = makeRuntime();
+      await recovered.resumeFromStore();
+      const cold = recovered as unknown as AgentRuntimeInternal;
+      expect(live.latestConversationMessageId).toBe(before.conversation);
+      expect(cold.latestConversationMessageId).toBe(before.conversation);
+      expect(cold.latestAssistantMessageId).toBe(before.assistant);
+      expect(cold.latestAssistantTurnId).toBe(before.turn);
+    } finally {
+      f.store.close();
+    }
+  });
+
+  for (const failurePoint of ["post_compact_hook", "committed_apply"] as const)
+    it(`preserves the stop marker through committed-state replay after ${failurePoint} cancellation`, async () => {
+      const f = await fixture();
+      let selectedId = "", trigger = false, submitted = false;
+      const requests: string[] = [];
+      const modelFactory = createTestModelFactory({
+        async generateText(request) {
+          requests.push(JSON.stringify(request.messages));
+          if (trigger && !submitted) {
+            submitted = true;
+            return {
+              text: "", finishReason: "tool-calls", usage: { totalTokens: 2 },
+              toolCalls: [{ id: "review-cancel-fold", name: "CompactNow", input: {
+                ranges: [{ startMessageId: selectedId, endMessageId: selectedId, summary: "REVIEW_COMMITTED_SUMMARY" }],
+              } }],
+            };
+          }
+          return { text: "synthetic answer", finishReason: "stop", usage: { totalTokens: 2 } };
+        },
+      });
+      const makeRuntime = () => createTestAgentRuntime(f.sessionId, {
+        workingDirectory: process.cwd(), systemPrompt: "Synthetic review.", modelStreaming: "off",
+        compact: { enabled: false }, toolAllowlist: ["CompactNow"],
+      }, { sessionStore: f.store, eventStore: createTestSessionEventStore(), modelFactory });
+      try {
+        const runtime = makeRuntime(), live = runtime as unknown as AgentRuntimeInternal;
+        await runtime.executeTurn("REVIEW_OLD_ORIGINAL ".repeat(400));
+        await runtime.executeTurn("second synthetic turn");
+        selectedId = live.messageHistory.borrowReadOnlyRuntimeEntries().find(
+          (entry) => entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+        )!.messageId!;
+        const abort = new AbortController();
+        const originalHook = live.runPostCompactHooks;
+        if (failurePoint === "post_compact_hook") {
+          live.runPostCompactHooks = async () => {
+            abort.abort();
+            abort.signal.throwIfAborted();
+            throw new Error("unreachable");
+          };
+        } else {
+          const commit = f.store.commitMessageBundle!.bind(f.store);
+          f.store.commitMessageBundle = async (input) => {
+            await commit(input);
+            if (input.messages.some((message) => message.parts.some((part) => part.type === "compaction" && part.compactBoundary)))
+              abort.abort();
+          };
+          const replace = live.messageHistory.replaceMessages.bind(live.messageHistory);
+          let failOnce = true;
+          live.messageHistory.replaceMessages = (entries) => {
+            if (failOnce && JSON.stringify(entries).includes("REVIEW_COMMITTED_SUMMARY")) {
+              failOnce = false;
+              throw new Error("synthetic committed apply failure");
+            }
+            replace(entries);
+          };
+        }
+        trigger = true;
+        await expect(runtime.executeTurn("trigger compact", undefined, { abortSignal: abort.signal }))
+          .rejects.toMatchObject({ type: CoreErrorType.TurnCancelled });
+        expect(live.pendingCommittedCompactApply).toBeDefined();
+        const markers = () => live.messageHistory.borrowReadOnlyRuntimeEntries().filter(
+          (entry) => entry.metadata?.source === "interrupt_marker",
+        );
+        expect(markers()).toHaveLength(1);
+        const markerId = markers()[0]!.messageId;
+        live.runPostCompactHooks = originalHook;
+        await runtime.executeTurn("continue after stopping");
+        expect(requests.at(-1)).toContain("[Request interrupted by user]");
+        expect(requests.at(-1)).toContain("REVIEW_COMMITTED_SUMMARY");
+        expect(requests.at(-1)).not.toContain("REVIEW_OLD_ORIGINAL");
+        expect(markers().map((entry) => entry.messageId)).toEqual([markerId]);
+        const recovered = makeRuntime();
+        await recovered.resumeFromStore();
+        expect((recovered as unknown as AgentRuntimeInternal).messageHistory.borrowReadOnlyRuntimeEntries()
+          .filter((entry) => entry.metadata?.source === "interrupt_marker")
+          .map((entry) => entry.messageId)).toEqual([markerId]);
+      } finally {
+        f.store.close();
+      }
+    });
+
+  it("recovers CompactNow ranges after real todo reminder persistence and a cold SQLite reopen", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "todo-range-resume-"));
+    const dbPath = join(directory, "session.sqlite"),
+      sessionId = createSessionId();
+    let store = await createSqliteSessionStore({ dbPath });
+    const requests: string[] = [];
+    let range: { startMessageId: string; endMessageId: string } | undefined,
+      submitted = false;
+    const marker = "ORIGINAL_HISTORY_BEFORE_TODO_";
+    const summary = "TODO_RANGE_SUMMARY_KEEP_USER_CONSTRAINT";
+    const factory = createTestModelFactory({
+      async generateText(request) {
+        const content = request.messages
+          .map((message) =>
+            typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+          )
+          .join("\n");
+        requests.push(content);
+        if (range && !submitted) {
+          submitted = true;
+          return {
+            text: "",
+            finishReason: "tool-calls",
+            usage: { totalTokens: 2 },
+            toolCalls: [
+              {
+                id: "todo-range-call",
+                name: "CompactNow",
+                input: { ranges: [{ ...range, summary }] },
+              },
+            ],
+          };
+        }
+        return {
+          text: "completed synthetic step",
+          finishReason: "stop",
+          usage: { totalTokens: 2 },
+        };
+      },
+    });
+    const makeRuntime = () =>
+      createTestAgentRuntime(
+        sessionId,
+        {
+          workingDirectory: directory,
+          modelStreaming: "off",
+          compact: { enabled: false },
+          toolAllowlist: ["CompactNow", "TodoWrite"],
+          systemPrompt: "Preserve the user's constraints.",
+        },
+        { sessionStore: store, eventStore: createTestSessionEventStore(), modelFactory: factory },
+      );
+    try {
+      await store.createSession({
+        id: sessionId,
+        projectID: createProjectId(),
+        directory,
+        slug: "todo-range",
+        title: "synthetic cold recovery",
+        version: "source",
+      });
+      const runtime = makeRuntime();
+      for (let index = 0; index < 12; index++)
+        await runtime.executeTurn(index === 0 ? marker.repeat(1000) : `completed request ${index}`);
+      const internal = runtime as unknown as AgentRuntimeInternal;
+      const persisted = await store.messages({ sessionID: sessionId });
+      const reminder = persisted.find(
+        (message) => message.info.semantics?.kind === "todo_reminder",
+      );
+      expect(reminder).toBeDefined();
+      const entries = internal.messageHistory.borrowReadOnlyRuntimeEntries();
+      expect(
+        entries.some(
+          (entry) => entry.kind === "attachment" && entry.metadata.source === "todo_reminder",
+        ),
+      ).toBe(true);
+      const users = entries.filter(
+        (entry) =>
+          entry.kind !== "attachment" &&
+          entry.message.role === "user" &&
+          entry.metadata?.source === "real_user",
+      );
+      const first = users[0]!,
+        last = users.at(-1)!;
+      if (first.kind === "attachment" || last.kind === "attachment")
+        throw new Error("missing user endpoints");
+      const plan = planCompactRanges(entries, [
+        { startMessageId: first.messageId!, endMessageId: last.messageId! },
+      ]);
+      if (!plan.ok) throw new Error(plan.message);
+      range = {
+        startMessageId: plan.ranges[0]!.startMessageId,
+        endMessageId: plan.ranges[0]!.endMessageId,
+      };
+      await runtime.executeTurn("fold consumed work now");
+      expect(submitted).toBe(true);
+      const records = await store.messages({ sessionID: sessionId });
+      const folded = records.find((message) =>
+        message.parts.some(
+          (part) => part.type === "compaction" && part.metadata?.compactFormat === "ranges-v1",
+        ),
+      );
+      expect(folded).toBeDefined();
+      const part = folded!.parts.find((part) => part.type === "compaction")!;
+      if (part.type !== "compaction") throw new Error("missing compact record");
+      expect(part.metadata?.hierarchy?.memberMessageIds).not.toContain(reminder!.info.id);
+      const liveIds = internal.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .flatMap((entry) =>
+          entry.kind !== "attachment" && entry.messageId ? [entry.messageId] : [],
+        );
+      store.close();
+      store = await createSqliteSessionStore({ dbPath });
+      const recovered = makeRuntime();
+      await recovered.resumeFromStore();
+      const coldIds = (recovered as unknown as AgentRuntimeInternal).messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .flatMap((entry) =>
+          entry.kind !== "attachment" && entry.messageId ? [entry.messageId] : [],
+        );
+      expect(coldIds).toEqual(liveIds);
+      await recovered.executeTurn("continue after restarting");
+      expect(requests.at(-1)).toContain(summary);
+      expect(requests.at(-1)).not.toContain(marker);
+      const original = await store.contextArchive.read({
+        sessionId,
+        tier: "original",
+        messageIds: [first.messageId!],
+        maxChars: 40000,
+      });
+      expect(original.content).toContain(marker.repeat(1000));
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it("explicit older summary reports the boundary belonging to that selected summary", async () => {
     const f = await fixture();
     try {
