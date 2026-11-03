@@ -1100,6 +1100,84 @@ describe("transcript→event 合成", () => {
     });
   });
 
+  it("cold compact ranges 共享 operationId 时取最后一段的边界与 tailStart", () => {
+    // ranges-v1（选择性区间压缩）一次操作会写 N 条共享 operationId 的 durable part
+    // （每段 boundary 不同）+ 1 条 Completed timeline part（boundary 取最后一段）。
+    // 旧实现按 operationId 只保留第一条 part，冷恢复的 operation 级事件会配上第一段
+    // 的 tailStart；这里锁定 live 契约：Completed 的 boundary/summary/tailStart 取
+    // 最后一段。
+    const operationId = "compact-operation-ranges";
+    const boundaryOf = (boundaryId: string, summaryMessageId: string) => ({
+      boundaryId,
+      trigger: CompactTrigger.Manual,
+      preCompactTokenCount: 10,
+      summarizedMessageCount: 2,
+      summaryMessageIds: [summaryMessageId] as never,
+      traceId: `trace-${boundaryId}` as never,
+    });
+    const rangePart = (
+      partId: string,
+      boundaryId: string,
+      summaryMessageId: string,
+      tailStartId: string,
+    ): MessagePart => ({
+      id: partId as never,
+      sessionID: "s1" as never,
+      messageID: "a-compact-ranges" as never,
+      type: "compaction",
+      auto: false,
+      operationId,
+      tail_start_id: tailStartId as never,
+      compactBoundary: boundaryOf(boundaryId, summaryMessageId),
+      metadata: {
+        compactFormat: "ranges-v1",
+        compactRange: {
+          rangeId: `range-${boundaryId}`,
+          startMessageId: `start-${tailStartId}` as never,
+          endMessageId: tailStartId as never,
+          summaryMessageId: summaryMessageId as never,
+        },
+      },
+    });
+    const compactHost = assistantMessageWithParts(
+      "a-compact-ranges",
+      "u-range-2",
+      [
+        {
+          id: "compact-ranges-timeline" as never,
+          sessionID: "s1" as never,
+          messageID: "a-compact-ranges" as never,
+          type: "timeline",
+          timelineType: "context_compaction",
+          display: "separator",
+          status: CompactTimelineStatus.Completed,
+          operationId,
+          trigger: CompactTrigger.Manual,
+          boundaryId: "boundary-2",
+          summaryMessageId: "summary-2" as never,
+        },
+        rangePart("compact-range-1", "boundary-1", "summary-1", "u-range-1"),
+        rangePart("compact-range-2", "boundary-2", "summary-2", "u-range-2"),
+      ],
+      1005,
+    );
+
+    const { events } = reduce([
+      userMessage("u-range-1", "covered segment 1", 1000),
+      userMessage("u-range-2", "covered segment 2", 1002),
+      compactHost,
+    ]);
+    const completed = events.filter((event) => event.type === SessionEventType.CompactCompleted);
+
+    expect(completed).toHaveLength(1);
+    expect(completed[0]?.payload).toMatchObject({
+      operationId,
+      boundaryId: "boundary-2",
+      summaryMessageId: "summary-2",
+      tailStartMessageId: "u-range-2",
+    });
+  });
+
   it("live/cold 的 edit/retry action 与 command target 逐行等价", () => {
     const messages = [
       userMessage("u-live-cold", "问题", 1000),

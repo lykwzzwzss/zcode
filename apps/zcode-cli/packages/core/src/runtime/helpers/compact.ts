@@ -77,6 +77,7 @@ export function buildPostCompactRuntimeEntries(
   summaryEntry: RuntimeMessageEntry,
   options: {
     leadingReminderEntries?: readonly RuntimeMessageEntry[];
+    priorSummaryEntries?: readonly RuntimeMessageEntry[];
     postCompactReminderEntries?: readonly RuntimeMessageEntry[];
     preservedEntries?: readonly RuntimeMessageEntry[];
   } = {},
@@ -86,6 +87,7 @@ export function buildPostCompactRuntimeEntries(
   return [
     ...activeEntries.slice(0, prefixCount).map(cloneRuntimeEntry),
     ...(options.leadingReminderEntries ?? []).map(cloneRuntimeEntry),
+    ...(options.priorSummaryEntries ?? []).map(cloneRuntimeEntry),
     cloneRuntimeEntry(summaryEntry),
     ...(options.preservedEntries ?? []).map(cloneCompactPreservedRuntimeEntry),
     ...(options.postCompactReminderEntries ?? []).map(cloneRuntimeEntry),

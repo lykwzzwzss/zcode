@@ -21,12 +21,16 @@ import {
   setReadFileStateEntry,
 } from "../../tool/read-file-state.js";
 import { resolveApprovedPlanFilePath } from "./plan-file-continuity.js";
+import { isDeepSeekFlashModel } from "../../native-context/contract.js";
 
 export type { PostCompactFileRead } from "../../tool/handlers/read.js";
 
 const POST_COMPACT_MAX_FILES = 5;
 const POST_COMPACT_MAX_FILE_TOKENS = 5_000;
 const POST_COMPACT_MAX_TOTAL_TOKENS = 50_000;
+const FLASH_POST_COMPACT_MAX_FILES = 2;
+const FLASH_POST_COMPACT_MAX_FILE_TOKENS = 4_000;
+const FLASH_POST_COMPACT_MAX_TOTAL_TOKENS = 6_000;
 const POST_COMPACT_RESTORE_SOURCE_TOOLS = new Set(["Read", "Write", "Edit"]);
 const SKIPPED_FILE_READ: PostCompactFileRead = { type: "skipped" };
 
@@ -42,6 +46,7 @@ export interface PostCompactFileRestore {
  * 规则见 docs/design/v2/rewind-compact.md 的“文件恢复”。
  */
 export async function buildPostCompactFileRestore(input: {
+  model?: { modelId: string };
   excludedPaths?: readonly string[];
   maxFileTokens?: number;
   maxFiles?: number;
@@ -56,8 +61,16 @@ export async function buildPostCompactFileRestore(input: {
   /** 保留段里相对路径的 Read 按它解析，和 Read 工具一致。 */
   workingDirectory?: string;
 }): Promise<PostCompactFileRestore> {
-  const maxFileTokens = input.maxFileTokens ?? POST_COMPACT_MAX_FILE_TOKENS;
-  const maxTotalTokens = input.maxTotalTokens ?? POST_COMPACT_MAX_TOTAL_TOKENS;
+  // Flash 的缓存读很便宜，但补回是全新的未命中内容；仅保留少量最近文件，其余按需 Read。
+  const flash = input.model !== undefined && isDeepSeekFlashModel(input.model);
+  const maxFileTokens =
+    input.maxFileTokens ??
+    (flash ? FLASH_POST_COMPACT_MAX_FILE_TOKENS : POST_COMPACT_MAX_FILE_TOKENS);
+  const maxTotalTokens =
+    input.maxTotalTokens ??
+    (flash ? FLASH_POST_COMPACT_MAX_TOTAL_TOKENS : POST_COMPACT_MAX_TOTAL_TOKENS);
+  const maxFiles =
+    input.maxFiles ?? (flash ? FLASH_POST_COMPACT_MAX_FILES : POST_COMPACT_MAX_FILES);
   const excludedKeys = new Set(
     [
       ...(input.excludedPaths ?? []),
@@ -70,7 +83,7 @@ export async function buildPostCompactFileRestore(input: {
     .filter((entry) => !shouldSkipPostCompactReadStatePath(entry.path))
     .filter((entry) => !excludedKeys.has(createReadFileStatePathKey(entry.path)))
     .sort((left, right) => restoreRecency(right) - restoreRecency(left))
-    .slice(0, input.maxFiles ?? POST_COMPACT_MAX_FILES);
+    .slice(0, maxFiles);
   const restore: PostCompactFileRestore = { entries: [], readFileStateEntries: [] };
   if (candidates.length === 0) return restore;
   const reads = await input.readFiles(
@@ -105,12 +118,14 @@ export function restorePostCompactFiles(
   runtime: AgentRuntimeInternal,
   input: {
     abortSignal?: AbortSignal;
+    model?: { modelId: string };
     preservedEntries: readonly RuntimeMessageEntry[];
     traceContext: TraceContext;
   },
 ): Promise<PostCompactFileRestore> {
   const instructions = runtime.contextSourceSnapshot?.userInstructions;
   return buildPostCompactFileRestore({
+    model: input.model ?? runtime.getSessionModelSelection(),
     excludedPaths: [
       resolveApprovedPlanFilePath({
         sessionId: runtime.sessionId,

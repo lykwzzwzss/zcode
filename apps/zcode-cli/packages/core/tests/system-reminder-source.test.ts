@@ -51,6 +51,9 @@ const EXPECTED_SOURCES = [
   "model_anomaly",
   "prompt_attachment",
   "diagnostics",
+  "compact_nudge",
+  "compact_result",
+  "context_index",
 ] as const satisfies readonly SystemReminderSource[];
 
 function expectExactlyOneSystemReminderWrapper(reminder: string): void {
@@ -107,6 +110,9 @@ describe("system reminder source descriptors", () => {
       "model_anomaly",
       "prompt_attachment",
       "diagnostics",
+      "compact_nudge",
+      "compact_result",
+      "context_index",
     ]);
 
     const groupedSources = [

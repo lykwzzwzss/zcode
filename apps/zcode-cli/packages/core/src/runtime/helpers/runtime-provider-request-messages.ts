@@ -45,6 +45,7 @@ export function prepareRuntimeProviderRequest(
     tools: readonly ModelToolContract[];
     registry?: Pick<ToolRegistry, "get">;
     prompt?: string;
+    toolExposureEntries?: readonly RuntimeMessageEntry[];
   },
 ) {
   const exposure = buildToolExposure({
@@ -53,6 +54,8 @@ export function prepareRuntimeProviderRequest(
     tools: input.tools,
     registry: input.registry,
     entries: input.entries,
+    // 摘要选区可能不含最近一次 ToolSearch；发现事实不能随正文裁剪而丢失。
+    discoveryEntries: input.toolExposureEntries,
   });
   const projection = buildRuntimeProviderRequestMessages(runtime, {
     entries:

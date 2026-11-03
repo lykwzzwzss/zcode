@@ -3,7 +3,7 @@
 ## 文档定位
 
 本文是 hooks 能力的 v2 规划，成熟度为 `L3 Implementation Contract`。它定义事件、配置、运行时边界、权限交互、可观测性和测试要求，并与根目录
-`docs/hooks-runtime-contract.md` 共同作为现有 7 个事件的验收依据。
+`docs/hooks-runtime-contract.md` 共同作为现有 9 个事件的验收依据。
 
 Hooks 的目标不是把业务逻辑散落到用户脚本里，而是在 agent loop 的关键安全边界提供可审计、可取消、可测试的扩展点。ZCode 的核心原则仍然成立：core 只表达意图，不直接触碰文件系统、网络、子进程或环境变量；所有外部 I/O 通过 adapter/port 收敛。
 
@@ -38,7 +38,7 @@ Hooks 的目标不是把业务逻辑散落到用户脚本里，而是在 agent l
 
 ## 非目标
 
-- 第一版不增加现有 7 个事件之外的新 Hook 事件。
+- 第一版不增加上述 9 个事件之外的新 Hook 事件。
 - 第一版不实现 prompt hook、agent hook、file watcher hook、worktree hook。
 - 第一版不实现 `if`、`once`、`asyncRewake`。
 - 第一版不让 hook 绕过 plan mode、显式 deny rule、sandbox 或 tool contract。
@@ -55,16 +55,17 @@ Hooks 的目标不是把业务逻辑散落到用户脚本里，而是在 agent l
 | `PostToolUse`        | tool 成功后、结果序列化给模型前               | 否                 | 可追加 context；P1 再支持替换输出 | 是，批次后附件；Hook stdin 获得完整 `tool_response` |
 | `PostToolUseFailure` | tool 失败后、错误返回模型前                   | 否                 | 可追加 recovery context           | 是，批次后附件                                      |
 | `Stop`               | turn 即将 complete 前                         | 是，可要求继续一轮 | 可追加 feedback context           | 是                                                  |
+| `PreCompact`         | 折叠请求发出前                                | 是，可取消本次折叠 | 可替换摘要正文、追加摘要指令      | 否；指令进入摘要请求                                |
+| `PostCompact`        | 折叠结果落盘后                                | 否                 | 可追加下一轮提醒                  | 是，作为 `hook_context` 附件                       |
 
 实现状态：
 
-- contract/config schema/runner 只声明并支持：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`PostToolUseFailure`、`Stop`。
+- contract/config schema/runner 声明并支持全部 9 个事件：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`PostToolUseFailure`、`Stop`、`PreCompact`、`PostCompact`。
 - 已接入 tool executor：`PreToolUse`、`PermissionRequest`、`PostToolUse`、`PostToolUseFailure`。
-- 本阶段补齐 runtime 主链路接入：`SessionStart`、`UserPromptSubmit`、`Stop`，并补齐 `PreToolUse.additionalContext` 的模型可见行为。
+- runtime 主链路接入：`SessionStart`、`UserPromptSubmit`、`Stop`、`PreCompact`、`PostCompact`，以及 `PreToolUse.additionalContext` 的模型可见行为。
 
 P1 再考虑：
 
-- `PreCompact` / `PostCompact`
 - `SubagentStart` / `SubagentStop`
 - `ModelRequest` / `ModelResponse`
 - `ConfigChange`
@@ -134,6 +135,8 @@ P1 再考虑：
 - `UserPromptSubmit`：`prompt`、`attachmentsSummary`
 - `SessionStart`：`source`
 - `Stop`：`responsePreview`、`toolCallCount`
+- `PreCompact`：`entriesToSummarize`、`historyTokens`、`reason`、`summarizeTokens`、`trigger`、`entriesTranscript`
+- `PostCompact`：`keptEntries`、`postCompactTokens`、`preCompactTokens`、`reason`、`savedTokens`、`summaryChars`、`trigger`
 
 模型侧仍只接收受 result budget 约束的工具结果；Hook 兼容边界按 Claude Code 传递完整结构化
 `tool_response`。`toolResultPreview` 和 artifact 引用作为 ZCode 扩展保留，不能替代
@@ -179,6 +182,15 @@ P0 使用一个统一 JSON 输出：
   - `continue: false` 或未返回输出表示 turn 可以结束。
   - `continue: true` 且带 `additionalContext` 表示把反馈注入下一轮模型请求。
   - `continue: true` 但没有 `additionalContext` 视为 no-op，避免空循环。
+- `PreCompact`
+  - `additionalContext`：与调用方 instructions 合并后写入摘要 prompt，并记录到 boundary 的
+    `customInstructions`，保证事后能还原这次折叠实际用了什么。
+  - `compactionSummary`：宿主直接采用该正文，跳过模型摘要请求（usage 记 0）。
+  - `continue: false` 或 `decision: "block"`：取消本次折叠，返回 `skipped`（不抛错），
+    并落一条 skipped 的 compact 时间线。
+- `PostCompact`
+  - `additionalContext`：作为 `hook_context` 附件注入下一轮请求；只影响后续提醒，
+    不能改写已落盘的摘要与 boundary。
 
 非 JSON stdout 在 P0 不进入模型上下文，只作为 hook diagnostic event 记录。未知 JSON 字段
 忽略，不能导致整个 Hook 失败；已知字段类型错误仍归为单 Hook contract violation。
@@ -192,6 +204,8 @@ P0 使用一个统一 JSON 输出：
 - `PermissionRequest continue:false`：拒绝当前权限请求，等价于 hook deny。
 - `PostToolUse` / `PostToolUseFailure continue:false`：P0 不阻断已完成的 tool，只记录 hook blocked event 和 reason。
 - `SessionStart continue:false`：P0 忽略阻断，只记录 blocked diagnostic；会话仍可继续。
+- `PreCompact continue:false` / `decision:"block"`：取消本次折叠，上下文保持原样。
+- `PostCompact continue:false`：折叠已完成，忽略阻断，只记录诊断。
 - `Stop decision:"block"`：仅当存在 reason 或 `additionalContext` 时继续下一轮模型请求。
 - 为兼容已有 ZCode 配置，`Stop continue:true` 且存在 `additionalContext` 也继续下一轮。
 
@@ -217,7 +231,7 @@ Tool 执行路径：
 
 - deny/block > ask > allow > passthrough。
 - 多个 `updatedInput` 时按执行顺序应用“最后一个有效完整替代 input”。如果后续校验失败，归因为 hook contract violation，tool 不执行。
-- 工具 Hook 的多个 `additionalContext` 按 hook 顺序保留为多条，不拼接。生命周期 Hook（`SessionStart` / `UserPromptSubmit` / `Stop`）仍把多条合成一条 `hook_context`，每条带 `#n` 编号。
+- 工具 Hook 的多个 `additionalContext` 按 hook 顺序保留为多条，不拼接。生命周期 Hook（`SessionStart` / `UserPromptSubmit` / `Stop` / `PostCompact`）仍把多条合成一条 `hook_context`，每条带 `#n` 编号；`PreCompact` 的 additionalContext 走摘要指令，不生成附件。
 - 工具 Hook（`PreToolUse` / `PostToolUse` / `PostToolUseFailure`）的每条 context 写成
   `<Event>:<ToolName> hook additional context: <context>`，作为 `tool_hook_context` 附件排在这批
   tool result 之后、其他批次提示之前；按 tool result 顺序分组，同一工具 Pre 在前。tool_result 只放工具原文，
@@ -346,9 +360,9 @@ Tool 执行路径：
 - 修改配置后废弃 deferred draft session，下一次发送使用新 runtime snapshot。
 - TUI progress 和最近执行结果仍作为后续增强项。
 
-### Phase 7: Expanded Events
+### Phase 7: Expanded Events（compact hooks 已完成）
 
-- 接入 compact hooks。
+- 接入 `PreCompact` / `PostCompact`：折叠前可取消/替换摘要/追加指令，折叠后可注入下一轮提醒。
 - 评估 HTTP / prompt / agent hook；shell command 与 plugin hook 已完成。
 
 ## 测试要求
@@ -382,6 +396,13 @@ Phase 4：
 - hook lifecycle events 包含 stdout/stderr preview、output bytes、truncated、duration。
 - `Stop` continuation 超过上限时记录 diagnostic，且 turn 正常结束。
 - abort 会取消正在等待的 lifecycle hook。
+
+compact hooks：
+
+- `PreCompact additionalContext` 进入摘要请求与 boundary metadata。
+- `PreCompact compactionSummary` 跳过模型摘要请求。
+- `PreCompact continue:false` 返回 skipped，不产生 boundary。
+- `PostCompact additionalContext` 作为 `hook_context` 进入下一轮请求。
 
 Phase 5：
 

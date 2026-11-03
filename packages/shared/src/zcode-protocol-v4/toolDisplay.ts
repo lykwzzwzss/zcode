@@ -21,7 +21,86 @@ import {
 // errorCode/suggestedAction/media(screenshot) 等结构化内容带到 renderer）。consume-main 之前
 // 缺这个 union + toolOutputSchema.display 字段——协议层 zod 校验会把 agent 下发的 display 整个
 // strip 掉，导致 UI 永远拿不到 display?.kind==="cua"，CUA 工具调用退化成 fallback 渲染。
+const nativeContextRangeDisplaySchema = z
+  .object({
+    boundaryId: z.string().max(128),
+    messageId: z.string().max(128),
+    summaryMessageId: z.string().max(128).optional(),
+    lastSummarizedMessageId: z.string().max(128).optional(),
+    summarizedMessageCount: z.number(),
+    level: z.number().optional(),
+    childBoundaryIds: z.array(z.string().max(128)).max(8).optional(),
+    childBoundaryCount: z.number().optional(),
+    originalMessageCount: z.number().optional(),
+    memberMessageCount: z.number().optional(),
+    preCompactTokenCount: z.number().optional(),
+    postCompactTokenCount: z.number().optional(),
+    trigger: z.string().max(128).optional(),
+    phase: z.string().max(128).optional(),
+    createdAt: z.number(),
+    cacheUsage: z
+      .object({
+        inputTokens: z.number().optional(),
+        cacheReadTokens: z.number().optional(),
+        cacheWriteTokens: z.number().optional(),
+        outputTokens: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export const nativeContextDisplaySchema = z
+  .object({
+    kind: z.literal("native_context"),
+    toolName: z.enum(["CompactNow", "CompactStatus", "SearchContext", "DecompressContext"]),
+    output: z
+      .object({
+        status: z.enum(["accepted", "rejected", "success", "not_found", "failed"]),
+        message: z.string().max(1200).optional(),
+        reason: z.string().max(128).optional(),
+        error: z.string().max(1200).optional(),
+        query: z.string().max(4000).optional(),
+        searchedMessageCount: z.number().optional(),
+        foldedMessageCount: z.number().optional(),
+        messageCount: z.number().optional(),
+        activeMessageCount: z.number().optional(),
+        lastCompactAt: z.number().optional(),
+        nextCursor: z.string().max(4096).optional(),
+        truncated: z.boolean().optional(),
+        displayTruncated: z.boolean().optional(),
+        boundaryId: z.string().max(128).optional(),
+        summaryMessageId: z.string().max(128).optional(),
+        tier: z.enum(["original", "summary"]).optional(),
+        content: z.string().max(1200).optional(),
+        filePath: z.string().max(4096).optional(),
+        bytesWritten: z.number().optional(),
+        ranges: z.array(nativeContextRangeDisplaySchema).max(200).optional(),
+        matches: z
+          .array(
+            z
+              .object({
+                kind: z.enum(["message", "summary"]).optional(),
+                messageId: z.string().max(128),
+                summaryMessageId: z.string().max(128).optional(),
+                boundaryId: z.string().max(128).optional(),
+                retained: z.boolean().optional(),
+                role: z.enum(["user", "assistant"]),
+                createdAt: z.number(),
+                folded: z.boolean(),
+                score: z.number(),
+                snippet: z.string().max(1200),
+              })
+              .strict(),
+          )
+          .max(40)
+          .optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const toolResultDisplaySchema = z.discriminatedUnion("kind", [
+  nativeContextDisplaySchema,
   bashOutputDisplaySchema,
   z.object({
     kind: z.literal("file_diff"),
@@ -277,6 +356,7 @@ const toolCallMcpDisplaySchema = z
   .strict();
 
 export const toolCallDisplaySchema = z.discriminatedUnion("kind", [
+  nativeContextDisplaySchema,
   toolCallNodeReplImageDisplaySchema,
   toolCallTaskOutputDisplaySchema,
   toolCallRespondToCoordinatorDisplaySchema,

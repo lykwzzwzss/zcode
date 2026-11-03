@@ -3619,6 +3619,33 @@ describe("ProductProjection 黄金测试（L1）", () => {
 
   // ── 错误态 ──
 
+  it("后台命令在启动 turn 前失败时仍向客户端暴露错误", () => {
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "", inputVisibility: "model-only" },
+      { turnId: "background-failure" },
+    );
+    log.push(
+      SessionEventType.TurnError,
+      {
+        error: { type: "InvalidStateTransition", message: "committed compact recovery failed" },
+        turnPhase: "queued",
+      },
+      { turnId: "background-failure" },
+    );
+    const snapshot = runAll(log.events).projection.getSnapshot();
+    expect(snapshot.control.phase).toBe("error");
+    expect(snapshot.control.lastError).toMatchObject({
+      message: "committed compact recovery failed",
+    });
+    expect(snapshot.rows.window.some((row) => row.kind === "userInput")).toBe(false);
+    expect(snapshot.rows.window.find((row) => row.kind === "turnHeader")).toMatchObject({
+      state: "failed",
+    });
+  });
+
   it("错误：turn_error → phase=error + lastError + turnHeader failed", () => {
     const turnId = "turn-1";
     const log = new EventLog();
@@ -4040,13 +4067,22 @@ describe("V4 API 重试状态投影", () => {
 
   it("配置读取重试保留错误类别，桌面与手机使用同一状态", () => {
     const { log, projection } = runningProjection();
-    const deltas = projection.applyEvent(log.push(
-      SessionEventType.ModelNetworkStatus,
-      modelStatus({ type: "model_retry_scheduled", delayMs: 2000, nextAttempt: 2,
-        reason: "network_error", errorCode: ModelErrorCode.ModelRequestVerificationConfigNetwork }),
-      { turnId: "turn-retry-1" },
-    ));
-    expect(projection.getSnapshot().control.apiRetry?.reasonCode).toBe("request_verification_config_network");
+    const deltas = projection.applyEvent(
+      log.push(
+        SessionEventType.ModelNetworkStatus,
+        modelStatus({
+          type: "model_retry_scheduled",
+          delayMs: 2000,
+          nextAttempt: 2,
+          reason: "network_error",
+          errorCode: ModelErrorCode.ModelRequestVerificationConfigNetwork,
+        }),
+        { turnId: "turn-retry-1" },
+      ),
+    );
+    expect(projection.getSnapshot().control.apiRetry?.reasonCode).toBe(
+      "request_verification_config_network",
+    );
     expect(() => conversationSnapshotSchema.parse(projection.getSnapshot())).not.toThrow();
     for (const profile of [DELIVERY_PROFILES.continuous, DELIVERY_PROFILES.replayable]) {
       expect(filterConversationDeltasForProfile(deltas, profile)).toEqual(deltas);

@@ -75,7 +75,13 @@ export type RuntimeMessageSource =
 export const INTERRUPT_MARKER_SOURCE = "interrupt_marker" satisfies RuntimeMessageSource;
 
 export interface RuntimeMessageMetadata {
+  compactHierarchy?: import("@zcode/contracts/context-memory").ContextFoldMetadata;
   compactBoundary?: { boundaryId: string; preCompactDiscoveredTools?: readonly string[] };
+  /**
+   * 增量折叠保留的上一代摘要（冷恢复时按 message.info.semantics.kind === "compact_summary"
+   * 且自身不带 compaction part 判定）。下一次折叠据此把它当「索引」而不是待摘要正文。
+   */
+  retainedCompactSummary?: true;
   toolSearchAnnouncement?: {
     addedNames: readonly string[];
     removedNames: readonly string[];
@@ -108,6 +114,15 @@ export interface RuntimeMessageMessageEntry {
    * compact 按它把这些 entry 视为一组，与按数据库消息分组的持久化边界保持一致；不会发送到 provider。
    */
   compactGroupKey?: string;
+  /**
+   * 这条 entry 所属持久化消息的 id（message.info.id），用于把运行时索引映射回
+   * SearchContext / DecompressContext 能解析的数据库消息。
+   *
+   * 只放在 entry 顶层，不塞进 message：provider 请求由 buildRuntimeProviderRequestMessages
+   * 投影，renderProjectedEntryToModelMessage 只读 entry.message（attachment 只读 content），
+   * 因此 messageId 不会序列化进请求体。
+   */
+  messageId?: string;
 }
 
 export interface RuntimeAttachmentEntry {
@@ -135,13 +150,25 @@ export interface MessageHistory {
   init(systemPromptOrMessages?: string | Array<ModelInputMessage | RuntimeMessageEntry>): void;
 
   // Add user message
-  addUser(content: ModelMessageContent, metadata?: RuntimeMessageMetadata): void;
+  addUser(
+    content: ModelMessageContent,
+    metadata?: RuntimeMessageMetadata,
+    messageId?: string,
+  ): void;
 
   // Add structured internal context that provider projection renders at request time.
   addAttachment(source: SystemReminderSource, content: string): void;
 
   // Add already-built runtime entries while preserving their source metadata.
   addEntries(entries: readonly RuntimeMessageEntry[]): void;
+
+  /**
+   * 标记当前模型步骤正在写入的持久化 assistant 消息 id。
+   * 步骤内提交的 assistant/tool entry 由 MessageHistory 统一补 messageId：这些提交点分散在
+   * 流式工具协调器、工具结算和 turn 收尾里，逐点传参容易漏。调用方必须在 finally 里清空，
+   * 避免把之后的提醒或用户输入算到这条消息名下。
+   */
+  setActiveAssistantMessageId(messageId: string | undefined): void;
 
   // Add assistant message (may include tool calls)
   addAssistant(
@@ -189,6 +216,8 @@ export interface MessageHistory {
 
 export class MessageHistoryImpl implements MessageHistory {
   private entries: RuntimeMessageEntry[] = [];
+  // 当前模型步骤对应的持久化 assistant 消息 id；只在该步骤内生效，见 setActiveAssistantMessageId。
+  private activeAssistantMessageId: string | undefined;
   private cacheStats: CacheStats = {
     totalMessages: 0,
     cachedMessages: 0,
@@ -216,8 +245,13 @@ export class MessageHistoryImpl implements MessageHistory {
     };
   }
 
-  addUser(content: ModelMessageContent, metadata?: RuntimeMessageMetadata): void {
-    this.entries.push(createRuntimeUserEntry(content, metadata));
+  addUser(
+    content: ModelMessageContent,
+    metadata?: RuntimeMessageMetadata,
+    messageId?: string,
+  ): void {
+    const entry = createRuntimeUserEntry(content, metadata);
+    this.entries.push(messageId ? { ...entry, messageId } : entry);
     this.cacheStats.totalMessages = this.entries.length;
   }
 
@@ -227,8 +261,32 @@ export class MessageHistoryImpl implements MessageHistory {
   }
 
   addEntries(entries: readonly RuntimeMessageEntry[]): void {
-    this.entries.push(...entries.map(cloneRuntimeMessageEntry));
+    this.entries.push(
+      ...entries.map((entry) =>
+        cloneRuntimeMessageEntry(this.stampActiveAssistantMessageId(entry)),
+      ),
+    );
     this.cacheStats.totalMessages = this.entries.length;
+  }
+
+  setActiveAssistantMessageId(messageId: string | undefined): void {
+    this.activeAssistantMessageId = messageId;
+  }
+
+  /**
+   * 只给 assistant/tool entry 自动补 id。同一个窗口里可能插入 guide 等 user 输入：
+   * 它们有各自的持久化消息，套用当前步骤的 assistant id 会让索引指向错误的消息。
+   *
+   * 这里直接写回传入对象（而不是只克隆）：commitTurnRequestEntries 在 addEntries 之后
+   * 还会把同一批对象存进 turnRequestState.entries，请求期索引与 canonical history
+   * 必须读到同一个 id。
+   */
+  private stampActiveAssistantMessageId(entry: RuntimeMessageEntry): RuntimeMessageEntry {
+    if (!this.activeAssistantMessageId || isRuntimeAttachmentEntry(entry)) return entry;
+    if (entry.message.role !== "assistant" && entry.message.role !== "tool") return entry;
+    if (entry.messageId) return entry;
+    entry.messageId = this.activeAssistantMessageId;
+    return entry;
   }
 
   addAssistant(
@@ -239,26 +297,28 @@ export class MessageHistoryImpl implements MessageHistory {
     tokens?: TokenUsageInfo,
   ): void {
     const reasoningBlocks = reasoning?.map((block) => cloneReasoningBlock(block)) ?? [];
-    this.entries.push({
-      message: {
-        role: "assistant",
-        content:
-          reasoningBlocks.length > 0
-            ? [
-                ...reasoningBlocks,
-                ...(content.length > 0 ? [{ type: "text" as const, text: content }] : []),
-              ]
-            : content,
-        toolCalls: toolCalls?.map((tc) => ({
-          id: tc.id,
-          name: tc.name,
-          input: tc.input,
-          ...(tc.modelCallWrapper ? { modelCallWrapper: tc.modelCallWrapper } : {}),
-        })),
-        ...(model ? { providerId: model.providerId, modelId: model.modelId } : {}),
-      },
-      ...(tokens ? { tokens: cloneTokenUsageInfo(tokens) } : {}),
-    });
+    this.entries.push(
+      this.stampActiveAssistantMessageId({
+        message: {
+          role: "assistant",
+          content:
+            reasoningBlocks.length > 0
+              ? [
+                  ...reasoningBlocks,
+                  ...(content.length > 0 ? [{ type: "text" as const, text: content }] : []),
+                ]
+              : content,
+          toolCalls: toolCalls?.map((tc) => ({
+            id: tc.id,
+            name: tc.name,
+            input: tc.input,
+            ...(tc.modelCallWrapper ? { modelCallWrapper: tc.modelCallWrapper } : {}),
+          })),
+          ...(model ? { providerId: model.providerId, modelId: model.modelId } : {}),
+        },
+        ...(tokens ? { tokens: cloneTokenUsageInfo(tokens) } : {}),
+      }),
+    );
     this.cacheStats.totalMessages = this.entries.length;
   }
 
@@ -271,7 +331,9 @@ export class MessageHistoryImpl implements MessageHistory {
     modelCallWrapper?: ModelCallWrapper,
   ): void {
     this.entries.push(
-      createRuntimeToolResultEntry(toolCallId, toolName, content, isError, modelCallWrapper),
+      this.stampActiveAssistantMessageId(
+        createRuntimeToolResultEntry(toolCallId, toolName, content, isError, modelCallWrapper),
+      ),
     );
     this.cacheStats.totalMessages = this.entries.length;
   }
@@ -464,7 +526,25 @@ export function cloneRuntimeMessageEntry(entry: RuntimeMessageEntry): RuntimeMes
     ...(entry.tokens ? { tokens: cloneTokenUsageInfo(entry.tokens) } : {}),
     ...(entry.queryScope ? { queryScope: entry.queryScope } : {}),
     ...(entry.compactGroupKey ? { compactGroupKey: entry.compactGroupKey } : {}),
+    ...(entry.messageId ? { messageId: entry.messageId } : {}),
   };
+}
+
+/**
+ * 给属于同一条持久化消息的 runtime entry 打上它的 message id（message.info.id）。
+ * 与 provider-tool-rounds 的 withCompactGroupKey 同一层语义：只写 entry 顶层，不会进入 provider 请求。
+ * attachment 没有对应的 message 行，跳过；重复调用保持幂等。
+ */
+export function withMessageId(
+  entries: readonly RuntimeMessageEntry[],
+  messageId: string | undefined,
+): RuntimeMessageEntry[] {
+  if (!messageId) return [...entries];
+  return entries.map((entry) =>
+    isRuntimeAttachmentEntry(entry) || entry.messageId === messageId
+      ? entry
+      : { ...entry, messageId },
+  );
 }
 
 /**
@@ -502,6 +582,15 @@ export function cloneRuntimeMessageMetadata(
     metadata.source === "environment" ? parseEnvironmentAnnouncement(environment) : undefined;
   return {
     ...rest,
+    ...(metadata.compactHierarchy
+      ? {
+          compactHierarchy: {
+            ...metadata.compactHierarchy,
+            memberMessageIds: [...metadata.compactHierarchy.memberMessageIds],
+            childBoundaryIds: [...metadata.compactHierarchy.childBoundaryIds],
+          },
+        }
+      : {}),
     ...(delta ? { agentListingDelta: delta } : {}),
     ...(announcement ? { environment: announcement } : {}),
     ...(metadata.compactBoundary

@@ -27,7 +27,7 @@ import {
   createTurnCancelledError,
   formatUnavailableRewindResponse,
   formatWorkspaceRewindNoticeBody,
-  getLatestActiveSessionMessageId,
+  getLatestConversationMessageId,
   isHiddenReminderMessage,
   isTurnCancellationError,
   selectCheckpointForMessage,
@@ -691,6 +691,8 @@ async function rebuildConversationDerivedState(
 
   // branch 重建，避免 compact/microcompact/read cache 或 provider usage 泄漏旧分支。
   this.messageHistory.reset();
+  // rewind 之后以重建的分支为准，禁止旧的提交应用重放覆盖它。
+  this.pendingCommittedCompactApply = undefined;
   await hydrateMessageHistoryFromSession({
     artifactStore: this.artifactStore,
     history: this.messageHistory,
@@ -720,7 +722,7 @@ async function rebuildConversationDerivedState(
   const latestAssistant = [...timelineActiveMessages]
     .reverse()
     .find((message) => message.info.role === "assistant");
-  this.latestConversationMessageId = getLatestActiveSessionMessageId(timelineActiveMessages);
+  this.latestConversationMessageId = getLatestConversationMessageId(timelineActiveMessages);
   this.latestAssistantMessageId = latestAssistant?.info.id;
   this.latestAssistantTurnId = latestAssistant?.info.anchor?.turnId as TurnId | undefined;
   this.lastAssistantCompletedAtMs =

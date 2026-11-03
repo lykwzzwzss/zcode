@@ -51,6 +51,7 @@ describe("AgentRuntime compact telemetry", () => {
           modelStepIndex: number;
           model: ReturnType<typeof createTestRuntimeModel>;
           rapidRefillCount: number;
+          turnRequestState: { entries: readonly unknown[]; outputTokenContinuationCount: number };
         },
       ): Promise<unknown>;
     };
@@ -82,11 +83,15 @@ describe("AgentRuntime compact telemetry", () => {
         modelStepIndex: 0,
         model: createTestRuntimeModel({
           contextWindow: 128_000,
-          generateText: async () => ({ finishReason: "stop", text: "" }),
+          generateText: async () => ({
+            finishReason: "stop",
+            text: "<summary>Reactive compact telemetry summary.</summary>",
+          }),
           modelId: "model-a",
           providerId: "test",
         }),
         rapidRefillCount: 0,
+        turnRequestState: { entries: activeEntries, outputTokenContinuationCount: 0 },
       },
     );
 

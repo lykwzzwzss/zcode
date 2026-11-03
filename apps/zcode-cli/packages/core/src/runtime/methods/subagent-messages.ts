@@ -5,6 +5,7 @@ import type { AgentRuntimeInternal } from "../internal.js";
 import type { EnqueueSubagentMessageInput } from "../types.js";
 import { runtimeInputMetadata } from "../../agent/runtime-input-presentation.js";
 import { escapeXml } from "../../runtime-task/notification.js";
+import { recoverCommittedCompactApply } from "./compact-active-helpers.js";
 
 export function formatSubagentMessage(input: {
   agentId: string;
@@ -80,9 +81,12 @@ export async function persistSubagentMessageCommand(
   midTurn = false,
 ): Promise<MessageId> {
   await this.ensureContextInitialized(command.traceContext);
+  // 子代理回复必须在压缩重放之后加入，否则重放会把已落盘的回复从活跃历史移除。
+  recoverCommittedCompactApply(this);
   const messageID = createMessageId();
   const inputPresentation = midTurn ? "subagent_reply_steer" : "subagent_reply";
-  this.messageHistory.addUser(command.text, runtimeInputMetadata(inputPresentation));
+  // 与 persistSyntheticUserNoticeForSession 落盘用同一个 messageID，冷恢复水合后 id 一致。
+  this.messageHistory.addUser(command.text, runtimeInputMetadata(inputPresentation), messageID);
   await this.persistSyntheticUserNoticeForSession({
     messageID,
     sessionId: this.sessionId,

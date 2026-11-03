@@ -204,6 +204,7 @@ export const compactBoundaryPayloadSchema = z
       .optional(),
     summarySource: z.enum(["model", "session_memory"]).optional(),
     preCompactTokenCount: z.number().int().nonnegative(),
+    // 新 boundary 中是折后上下文的本地估算；摘要请求实际用量记录在 cacheUsage/model_usage。
     postCompactTokenCount: z.number().int().nonnegative().optional(),
     truePostCompactTokenCount: z.number().int().nonnegative().optional(),
     autoCompactThreshold: z.number().int().nonnegative().optional(),
@@ -284,6 +285,11 @@ export interface CompactProjectionInfo {
 export interface CompactContextItem {
   id: string;
   compactBoundary?: CompactBoundaryPayload;
+  /**
+   * ranges-v1：该边界只折叠这一段。rewind 判定用它区分「区间内的原文」与仍活跃的
+   * gap / 未选前缀，不能再用「最后一个 boundary 之前」的旧规则。
+   */
+  compactRange?: { endMessageId: string; startMessageId: string };
   isCompactSummary?: boolean;
 }
 

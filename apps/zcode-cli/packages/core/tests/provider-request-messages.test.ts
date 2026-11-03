@@ -62,6 +62,44 @@ function toolResult(
 // 折叠只在 Anthropic Messages 协议打开，由模型请求能力决定。
 const FOLD = { foldRemindersIntoToolResults: true } as const;
 
+describe("ephemeral context reminders preserve the provider prefix", () => {
+  for (const useMidConversationSystem of [false, true]) {
+    for (const foldRemindersIntoToolResults of [false, true]) {
+      for (const source of ["compact_nudge", "compact_result", "context_index"] as const) {
+        for (const tail of ["user", "tool"] as const) {
+          it(`${source}: keeps a ${tail} tail unchanged with MCS=${useMidConversationSystem} fold=${foldRemindersIntoToolResults}`, () => {
+            const stable: RuntimeMessageEntry[] = [
+              entry(user("initial constraints"), "real_user"),
+              entry(assistant("READY")),
+              tail === "user"
+                ? entry(user("large stable user input ".repeat(1000)), "real_user")
+                : entry(toolResult("large stable tool output ".repeat(1000))),
+            ];
+            const options = { useMidConversationSystem, foldRemindersIntoToolResults };
+            const original = buildProviderRequestMessages({ ...options, entries: stable }).messages;
+            const first = buildProviderRequestMessages({
+              ...options,
+              entries: [...stable, attachment(source, "old transient hint")],
+            }).messages;
+            const next = buildProviderRequestMessages({
+              ...options,
+              entries: [
+                ...stable,
+                entry(assistant("READY")),
+                entry(user("next input"), "real_user"),
+                attachment(source, "new transient hint"),
+              ],
+            }).messages;
+            expect(first.slice(0, original.length)).toEqual(original);
+            expect(next.slice(0, original.length)).toEqual(original);
+            expect(first.at(-1) && providerText(first.at(-1)!)).toContain("old transient hint");
+          });
+        }
+      }
+    }
+  }
+});
+
 function providerText(message: ModelInputMessage): string {
   return typeof message.content === "string"
     ? message.content

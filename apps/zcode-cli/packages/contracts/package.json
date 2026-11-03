@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./context-memory": {
+      "types": "./dist/context-memory/contract.d.ts",
+      "import": "./dist/context-memory/contract.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

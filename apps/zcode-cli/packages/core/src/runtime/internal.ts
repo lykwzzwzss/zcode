@@ -1,5 +1,5 @@
 import { PermissionService, ToolScheduler } from "./deps.js";
-import type { ModelRequestSessionFeature } from "@zcode/contracts";
+import type { CompactRangeInput, ModelRequestSessionFeature } from "@zcode/contracts";
 import type {
   Logger,
   ModelSelection,
@@ -56,6 +56,7 @@ import type { DynamicWorkflowActivationSource } from "./methods/dynamic-workflow
 import type { AgentRuntimeCoreMethods } from "./internal-methods.js";
 import type { AgentRuntimeTurnMethods } from "./internal-turn-methods.js";
 import type { AgentRuntimeHookMethods } from "./internal-hook-methods.js";
+import type { CommittedCompactState } from "./methods/compact-active-helpers.js";
 import type { MemoryRecallState } from "../memory/recall/index.js";
 import type { ProjectMemoryRecallPrefetch } from "./helpers/project-memory-recall.js";
 import type { ProjectMemoryExtractionScheduler } from "./helpers/project-memory-extraction.js";
@@ -90,6 +91,8 @@ export interface AgentRuntimeInternal
   modelRequestAdmission?: AgentRuntimeDeps["modelRequestAdmission"];
   sessionModelSelection: ModelSelection | undefined;
   messageHistory: MessageHistory;
+  /** 摘要已落盘但活跃状态应用失败的重放输入；下一次请求前必须收敛。 */
+  pendingCommittedCompactApply?: CommittedCompactState;
   readFileState: ReadFileStateMap;
   cachedTools: ModelToolContract[] | null;
   /** 工作流工具面是否已注册（launch.md「On demand: activation」）；非 onDemand 会话出生即 true。 */
@@ -157,6 +160,17 @@ export interface AgentRuntimeInternal
   sessionPersisted: boolean;
   needsPlanModeExitReminder: boolean;
   latestConversationMessageId?: MessageId;
+  /**
+   * 模型通过 CompactNow 排队的折叠请求。turn-loop 在下一个安全点消费一次：
+   * 折叠必须发生在工具批次之后、下一次模型请求之前，不能在历史正被读写时插入。
+   */
+  pendingCompactRequest?: {
+    instructions?: string;
+    ranges?: readonly CompactRangeInput[];
+    reason?: string;
+  };
+  /** 上一次发出折叠提醒时的历史 token 数；只有再次增长到阈值才重新提醒。 */
+  lastCompactNudgeTokenCount?: number;
   latestAssistantMessageId?: MessageId;
   latestAssistantTurnId?: TurnId;
   mainTurnCacheHitAggregate: MainTurnCacheHitAggregate;

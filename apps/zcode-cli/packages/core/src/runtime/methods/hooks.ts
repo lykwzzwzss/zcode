@@ -103,6 +103,85 @@ export async function runStopHooks(
   );
 }
 
+/**
+ * compact 前置钩子。`matchValue` 用 trigger（manual / auto / reactive …），
+ * 让钩子可以只对某一类压缩生效（例如只在自动压缩时接管折叠）。
+ */
+export async function runPreCompactHooks(
+  this: AgentRuntimeInternal,
+  input: {
+    entriesToSummarize: number;
+    entriesTranscript?: string;
+    historyTokens: number;
+    reason: string;
+    summarizeTokens: number;
+    trigger: string;
+  },
+  traceContext: TraceContext,
+  signal?: AbortSignal,
+): Promise<HookRunResult> {
+  if (!this.hookRunner) return EMPTY_HOOK_RESULT;
+
+  return this.hookRunner.run(
+    {
+      agentName: this.config.agentName,
+      cwd: this.workingDirectory,
+      entriesToSummarize: input.entriesToSummarize,
+      entriesTranscript: input.entriesTranscript,
+      historyTokens: input.historyTokens,
+      hookEventName: HookEventName.PreCompact,
+      mode: this.getMode(),
+      reason: input.reason,
+      sessionId: this.sessionId,
+      summarizeTokens: input.summarizeTokens,
+      timestamp: new Date().toISOString(),
+      traceId: traceContext.traceId,
+      trigger: input.trigger,
+      turnId: traceContext.turnId,
+    },
+    { matchValue: input.trigger, signal },
+  );
+}
+
+/** compact 后置钩子：只观察，不改写已落盘的结果。 */
+export async function runPostCompactHooks(
+  this: AgentRuntimeInternal,
+  input: {
+    keptEntries: number;
+    postCompactTokens: number;
+    preCompactTokens: number;
+    reason: string;
+    savedTokens: number;
+    summaryChars: number;
+    trigger: string;
+  },
+  traceContext: TraceContext,
+  signal?: AbortSignal,
+): Promise<HookRunResult> {
+  if (!this.hookRunner) return EMPTY_HOOK_RESULT;
+
+  return this.hookRunner.run(
+    {
+      agentName: this.config.agentName,
+      cwd: this.workingDirectory,
+      hookEventName: HookEventName.PostCompact,
+      keptEntries: input.keptEntries,
+      mode: this.getMode(),
+      postCompactTokens: input.postCompactTokens,
+      preCompactTokens: input.preCompactTokens,
+      reason: input.reason,
+      savedTokens: input.savedTokens,
+      sessionId: this.sessionId,
+      summaryChars: input.summaryChars,
+      timestamp: new Date().toISOString(),
+      traceId: traceContext.traceId,
+      trigger: input.trigger,
+      turnId: traceContext.turnId,
+    },
+    { matchValue: input.trigger, signal },
+  );
+}
+
 export function injectHookAdditionalContextIntoMessageHistory(
   this: AgentRuntimeInternal,
   eventName: HookEventNameType,

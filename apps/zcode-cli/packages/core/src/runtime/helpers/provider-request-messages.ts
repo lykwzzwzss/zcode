@@ -47,9 +47,16 @@ export interface ProviderRequestMessageProjectionResult {
 const ENABLE_MCS_ADJACENT_USER_MERGE = false;
 const TOOL_SEARCH_LOADED_MESSAGE = "Tool loaded.";
 
+// 临时上下文提示每轮都会变化；提前到大输入前或并入旧工具结果会改写已缓存的前缀。
+const TAIL_CONTEXT_REMINDER_SOURCES: ReadonlySet<SystemReminderSource> = new Set([
+  "compact_nudge",
+  "compact_result",
+  "context_index",
+]);
 // State changes must keep their causal position relative to older target continuations.
 const NON_BUBBLING_ATTACHMENT_SOURCES: ReadonlySet<SystemReminderSource> = new Set([
   "goal_state_change",
+  ...TAIL_CONTEXT_REMINDER_SOURCES,
 ]);
 
 export function buildProviderRequestMessages(input: {
@@ -375,7 +382,11 @@ function isFoldableReminder(
   if (typeof message.content !== "string" && message.content.some((b) => b.type !== "text")) {
     return false;
   }
-  if (isRuntimeAttachmentEntry(entry)) return true;
+  if (isRuntimeAttachmentEntry(entry))
+    return (
+      !isKnownSystemReminderSource(entry.metadata.source) ||
+      !TAIL_CONTEXT_REMINDER_SOURCES.has(entry.metadata.source)
+    );
   if (isPresentedInput(entry)) return false;
   return isReminderMessage(entry);
 }

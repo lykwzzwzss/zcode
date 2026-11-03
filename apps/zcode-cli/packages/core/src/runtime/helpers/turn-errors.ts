@@ -23,6 +23,12 @@ interface TurnAbortScope {
 }
 
 const EXTERNAL_TURN_FAULT_MARKER = "zcode.externalTurnFault";
+// 同一个错误可能先经过 turn 收口，再穿过后台队列；只发布一次用户可见终态。
+const reportedTurnFailures = new WeakSet<object>();
+
+export function wasTurnFailureReported(error: unknown): boolean {
+  return typeof error === "object" && error !== null && reportedTurnFailures.has(error);
+}
 
 interface ExternalTurnFaultError extends Error {
   code: string;
@@ -223,6 +229,7 @@ export async function appendTurnOutcomeEvent(
         traceContext,
       );
   await runtime.appendEvent(outcomeEvent, traceContext);
+  reportedTurnFailures.add(coreError);
   events.push(outcomeEvent);
 
   runtime.logger?.error(`${params.logLabel} failed`, coreError, {

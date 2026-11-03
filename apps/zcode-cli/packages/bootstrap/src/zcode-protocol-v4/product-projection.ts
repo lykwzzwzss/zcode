@@ -60,6 +60,7 @@ import {
   AMEND_WORKFLOW_TOOL_NAME,
   CREATE_WORKFLOW_TOOL_NAME,
   CoreErrorType,
+  HookEventName,
   ModelErrorCode,
   SessionEventType,
   getModelUsageContextTokens,
@@ -1657,6 +1658,16 @@ export class ProductProjection {
 
   private onHookRunLifecycle(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as HookRunLifecyclePayload;
+    // 桌面端 app.asar 内嵌的 hookInvocation 行 schema 只认 7 个旧事件名
+    // （SessionStart…Stop）。压缩钩子照常执行、照常落 session event，但不投影成
+    // UI 行：否则整帧过不了桌面端校验，客户端会以 fault.subscription.contentRejected
+    // 断开订阅（表现为“重新连接”）。
+    if (
+      payload.hookEventName === HookEventName.PreCompact ||
+      payload.hookEventName === HookEventName.PostCompact
+    ) {
+      return [];
+    }
     const hookInvocationId = payload.hookInvocationId;
     const hookCount = payload.hookCount;
     if (

@@ -40,6 +40,7 @@ export type ContextSource =
   | "memory" // 长期 memory read path
   | "current_date" // 当前日期
   | "custom_system_prompt" // 自定义 stable system body
+  | "plugin_system_prompt" // 插件贡献的 stable system 段（append，不替换 identity）
   | "workflow_actor_identity" // 动态工作流子代理身份：契约 + persona 叠加
   | "subagent_agent_prompt" // 子 agent 专属身份/任务 prompt
   | "subagent_notes" // 子 agent 通用操作提醒

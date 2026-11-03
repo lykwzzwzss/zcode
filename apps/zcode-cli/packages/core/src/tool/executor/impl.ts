@@ -65,6 +65,9 @@ export class ToolExecutorImpl implements ToolExecutor {
       offPeakPort: options.offPeakPort,
       topicResourcePort: options.topicResourcePort,
       sessionStore: options.sessionStore,
+      // 构造器按字段白名单拷贝：漏这一行，端口在 executor 里被丢掉，
+      // CompactNow 会在运行时永远报 port_unavailable（类型检查发现不了）。
+      compactControlPort: options.compactControlPort,
       sessionModePort: options.sessionModePort,
       workflowPort: options.workflowPort,
       dynamicWorkflowRunPort: options.dynamicWorkflowRunPort,

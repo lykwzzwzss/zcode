@@ -11,6 +11,10 @@ export const HookEventName = {
   PermissionRequest: "PermissionRequest",
   PostToolUse: "PostToolUse",
   PostToolUseFailure: "PostToolUseFailure",
+  /** compact 开始前触发：钩子可以只做观察，也可以直接提供折叠后的摘要正文（宿主发起压缩）。 */
+  PreCompact: "PreCompact",
+  /** compact 完成后触发：报告折叠了多少、省了多少 token。 */
+  PostCompact: "PostCompact",
   Stop: "Stop",
 } as const;
 
@@ -152,6 +156,53 @@ export interface StopHookInput extends BaseHookInput {
   toolCallCount: number;
 }
 
+/**
+ * compact 前置钩子：宿主把"要折哪一段"告诉钩子，钩子可以
+ * - 只观察（返回空），
+ * - 提供 `compactionSummary` 让宿主直接采用（跳过模型摘要请求），
+ * - 用 `additionalContext` 给摘要请求追加指令（与 /compact 的 instructions 合并后一起进摘要请求），
+ * - 用 `continue:false` 或 `decision:"block"` 取消本次折叠（返回 skipped，不抛错）。
+ */
+export interface PreCompactHookInput extends BaseHookInput {
+  hookEventName: typeof HookEventName.PreCompact;
+  /** 参与折叠的历史条数（不含被保留的 prefix）。 */
+  entriesToSummarize: number;
+  /** 折叠前的估算 token 总量。 */
+  historyTokens: number;
+  /** 压缩原因：user_requested | context_limit | provider_overflow。 */
+  reason: string;
+  /** 本次折叠的估算 token 上限。 */
+  summarizeTokens: number;
+  /** 触发源：manual | auto | reactive | partial | session_memory。 */
+  trigger: string;
+  /**
+   * 待折叠历史渲染成的 JSONL（每行 `{role, content}`）。宿主发起折叠要读到原文，
+   * 否则钩子只能拿到条数、写不出正文。只写进钩子的 transcript_path 文件，
+   * 不进 stdin JSON：这一段可能有上兆字节，走管道会把钩子进程堵死。
+   */
+  entriesTranscript?: string;
+}
+
+/**
+ * compact 后置钩子：不能改写已落盘的结果；`additionalContext` 会作为下一轮的
+ * hook_context 提醒注入会话（与 SessionStart/Stop 的注入语义一致）。
+ */
+export interface PostCompactHookInput extends BaseHookInput {
+  hookEventName: typeof HookEventName.PostCompact;
+  /** 折叠后保留的条数。 */
+  keptEntries: number;
+  /** 折叠后估算 token 总量。 */
+  postCompactTokens: number;
+  /** 折叠前的估算 token 总量。 */
+  preCompactTokens: number;
+  reason: string;
+  /** 实际省下的估算 token（preCompactTokens - postCompactTokens）。 */
+  savedTokens: number;
+  /** 摘要正文长度（字符）。 */
+  summaryChars: number;
+  trigger: string;
+}
+
 export type HookInput =
   | PreToolUseHookInput
   | PermissionRequestHookInput
@@ -159,6 +210,8 @@ export type HookInput =
   | PostToolUseFailureHookInput
   | UserPromptSubmitHookInput
   | SessionStartHookInput
+  | PreCompactHookInput
+  | PostCompactHookInput
   | StopHookInput;
 
 export type PermissionRequestHookDecision =
@@ -197,6 +250,20 @@ export type HookSpecificOutput =
   | {
       additionalContext?: string;
       hookEventName: typeof HookEventName.PostToolUseFailure;
+    }
+  | {
+      additionalContext?: string;
+      /**
+       * 宿主发起压缩：给出折叠后的摘要正文，宿主直接采用它替代模型摘要请求。
+       * 只在 PreCompact 上生效。
+       */
+      compactionSummary?: string;
+      hookEventName: typeof HookEventName.PreCompact;
+    }
+  | {
+      /** 折叠完成后的提醒，作为 hook_context 注入下一轮请求。 */
+      additionalContext?: string;
+      hookEventName: typeof HookEventName.PostCompact;
     }
   | {
       decision?: PermissionRequestHookDecision;
@@ -282,6 +349,15 @@ export const HookSpecificOutputSchema = z.discriminatedUnion("hookEventName", [
   z.object({
     additionalContext: z.string().optional(),
     hookEventName: z.literal(HookEventName.PostToolUseFailure),
+  }),
+  z.object({
+    additionalContext: z.string().optional(),
+    compactionSummary: z.string().optional(),
+    hookEventName: z.literal(HookEventName.PreCompact),
+  }),
+  z.object({
+    additionalContext: z.string().optional(),
+    hookEventName: z.literal(HookEventName.PostCompact),
   }),
   z.object({
     decision: PermissionRequestHookDecisionSchema.optional(),
@@ -434,6 +510,8 @@ export const HooksRuntimeConfigPatchSchema = z.object({
       PermissionRequest: z.array(HookMatcherConfigSchema).optional(),
       PostToolUse: z.array(HookMatcherConfigSchema).optional(),
       PostToolUseFailure: z.array(HookMatcherConfigSchema).optional(),
+      PreCompact: z.array(HookMatcherConfigSchema).optional(),
+      PostCompact: z.array(HookMatcherConfigSchema).optional(),
       Stop: z.array(HookMatcherConfigSchema).optional(),
     })
     .strict()

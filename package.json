@@ -1,7 +1,8 @@
 {
   "name": "zcode",
-  "version": "3.17.1",
+  "version": "3.17.1-20261103",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev:web": "concurrently -k -n server,web -c blue,green \"pnpm --filter @zcode/server dev\" \"pnpm --filter @zcode/web dev\"",
@@ -64,6 +65,7 @@
     "bootstrap": "node scripts/bootstrap.mjs",
     "bootstrap:with-remote": "node scripts/bootstrap.mjs --with-remote",
     "release": "release-it",
+    "version:personal": "node scripts/personal-release-version.mjs",
     "release:cli": "pnpm --dir apps/zcode-cli run release",
     "release:cli:dry": "pnpm --dir apps/zcode-cli run release:dry",
     "architecture:check": "node scripts/architecture/architecture-check.mjs check",
@@ -136,6 +138,5 @@
       "@aiden0z/pptx-renderer@1.2.4": "patches/@aiden0z__pptx-renderer@1.2.4.patch",
       "@extend-ai/react-xlsx@0.16.0": "patches/@extend-ai__react-xlsx@0.16.0.patch"
     }
-  },
-  "license": "Apache-2.0"
+  }
 }

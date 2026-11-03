@@ -28,7 +28,7 @@ test("800 行为默认阻断阈值，已接纳的大文件仅降级行数诊断"
         Array.from({ length: lines }, (_, i) => `export const value${i} = ${i};`).join("\n"),
       );
       const packageRoot = file.startsWith("apps/zcode-cli/")
-        ? "apps/zcode-cli/packages/bootstrap"
+        ? file.split("/").slice(0, 4).join("/")
         : ".";
       const target = packageRoot === "." ? file : file.slice(packageRoot.length + 1);
       const result = await exec(
@@ -50,6 +50,16 @@ test("800 行为默认阻断阈值，已接纳的大文件仅降级行数诊断"
       (await lint(accepted, 801)).find((x) => x.code === "eslint(max-lines)")?.severity,
       "warning",
     );
+    for (const file of [
+      "apps/zcode-cli/packages/core/src/runtime/methods/compact-active.ts",
+      "apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/cold-event-merge.ts",
+    ]) {
+      assert.equal(
+        (await lint(file, 801)).find((x) => x.code === "eslint(max-lines)")?.severity,
+        "error",
+        `${file} 不得重新降级行数检查`,
+      );
+    }
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

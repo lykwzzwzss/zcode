@@ -1,5 +1,10 @@
 import { posix } from "node:path";
 
+/** Windows 独立 pnpm 是可执行程序，交给 Node 读取会把 MZ 文件头误报为语法错误。 */
+export function packageManagerCommand(pnpm, node, args) {
+  return /\.exe$/iu.test(pnpm) ? { file: pnpm, args } : { file: node, args: [pnpm, ...args] };
+}
+
 /** 当前各包都是直接 oxlint；未知脚本必须显式接入，不能被枚举器悄悄漏过。 */
 export function parseLintCommand(command) {
   if (!/^oxlint(?: [\w./*-]+)*$/u.test(command) || /(?:--format| -f)(?: |$)/u.test(command))

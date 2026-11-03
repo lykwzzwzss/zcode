@@ -146,7 +146,7 @@ Core 不直接读写文件、不读 `process.env`、不直接调用 provider SDK
 
 目标：每轮 provider 请求前自动判断是否需要 compact。
 
-当前第二阶段先在 core runtime 内实现 policy 和熔断，不直接读取环境变量。CLI/bootstrap 后续负责把 `ZCODE_` 环境变量和用户配置解析成 `AgentRuntimeConfig.compact`。Auto compact 失败不应让当前用户 turn 失败；它只增加连续失败计数，达到 `maxConsecutiveFailures` 后跳过后续自动尝试，直到一次成功 compact 重置计数。
+Core runtime 负责压缩策略和熔断。执行异常应终止当前轮并暴露原因；连续失败达到 `maxConsecutiveFailures` 后，在仍需压缩时停止自动重试并明确报错。压缩成功后重置计数，未达阈值或主动关闭压缩仍可正常继续。
 
 策略：
 
@@ -161,20 +161,19 @@ shouldCompact = activeTokenEstimate >= autoThreshold
 - 用户配置关闭 compact。
 - 用户配置关闭 auto compact。
 - `querySource` 是 `compact`、`session_memory`、summary agent、subagent 内部压缩路径。
-- 当前 session 的连续自动 compact 失败数达到 3。
 
 测试：
 
 - token 超阈值触发 auto compact。
 - 低于阈值不触发。
 - compact 自身请求不会递归 auto compact。
-- 失败 3 次后熔断，后续 turn 不再重复烧 provider。
+- 失败 3 次后熔断，后续仍需压缩的 turn 明确报错且不再重复请求 provider。
 - 成功后 consecutive failures 归零。
 
 验收：
 
 - `compact.started`、`compact.completed`、`compact.failed` 都带 pre/post token、threshold、willRetriggerNextTurn。
-- auto compact 失败时当前 turn 可以继续使用原 messages，除非 provider 后续真实返回 context overflow。
+- auto compact 抛出异常时当前 turn 不发送正常模型请求，保留错误原因供用户处理。
 
 ### M3: Prompt-too-long 与 overflow 兜底
 

@@ -1,3 +1,4 @@
+import type { CompactRangeInput } from "@zcode/contracts";
 import {
   createConfiguredHookRunner,
   createInMemoryHookRunner,
@@ -191,6 +192,26 @@ function createRuntimeToolExecutor(
     offPeakPort: deps.offPeakPort,
     topicResourcePort: deps.topicResourcePort,
     sessionStore: deps.sessionStore,
+    // 模型自决折叠：Agent 派生的子代理不注入（它们没有主会话历史，Compaction 会改错对象）。
+    // workflow_child / nested_workflow_child 有自己独立的 history，折叠自身历史上是安全的，
+    // 所以照常注入；它们与主会话互不影响。
+    ...(runtime.config.taskType === "subagent_child"
+      ? {}
+      : {
+          compactControlPort: {
+            requestCompact: (input: {
+              instructions?: string;
+              ranges?: readonly CompactRangeInput[];
+              reason?: string;
+            }) => {
+              if (runtime.pendingCompactRequest) {
+                return { accepted: false, reason: "compaction_already_requested" };
+              }
+              runtime.pendingCompactRequest = input;
+              return { accepted: true };
+            },
+          },
+        }),
     sessionModePort: createRuntimeSessionModePort(runtime),
     workflowPort: deps.workflowPort,
     dynamicWorkflowRunPort: deps.dynamicWorkflowRunPort,

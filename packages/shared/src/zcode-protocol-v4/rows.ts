@@ -330,6 +330,8 @@ export const hookInvocationRowSchema = z.object({
     "PermissionRequest",
     "PostToolUse",
     "PostToolUseFailure",
+    "PreCompact",
+    "PostCompact",
     "Stop",
   ]),
   hookCount: z.number().int().positive(),

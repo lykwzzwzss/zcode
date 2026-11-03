@@ -10,6 +10,46 @@ import { readToolEntry } from "../src/tool/handlers/read.js";
 import { todoWriteToolEntry } from "../src/tool/handlers/todo.js";
 import type { RuntimeMessageEntry } from "../src/agent/message-history.js";
 import { collectDiscoveredTools, parseToolSearchHiddenNames } from "../src/tool/search/history.js";
+import { prepareRuntimeProviderRequest } from "../src/runtime/helpers/runtime-provider-request-messages.js";
+
+it("keeps compact tools identical when discovery exists only in the preserved tail", () => {
+  const registry = createToolRegistry();
+  [toolSearchToolEntry, webFetchToolEntry, readToolEntry].forEach((entry) =>
+    registry.register(entry),
+  );
+  const entries: RuntimeMessageEntry[] = [{ message: { role: "user", content: "old content" } }];
+  const activeEntries: RuntimeMessageEntry[] = [
+    ...entries,
+    {
+      message: {
+        role: "tool",
+        toolName: "ToolSearch",
+        toolCallId: "discover-tail",
+        content: [{ type: "tool_reference", toolName: "WebFetch" }],
+      },
+    },
+  ];
+  const runtime = { config: { toolSearch: { mode: "native" as const } } };
+  const input = { model: model(true), tools: registry.toContracts(), registry };
+  const main = prepareRuntimeProviderRequest(runtime, { ...input, entries: activeEntries });
+  const compact = prepareRuntimeProviderRequest(runtime, {
+    ...input,
+    entries,
+    toolExposureEntries: activeEntries,
+    prompt: "summarize",
+  });
+  expect(compact.request.tools).toEqual(main.request.tools);
+  expect(compact.request.messages.map((message) => message.content)).not.toContainEqual(
+    activeEntries[1]!.message.content,
+  );
+  const denied = prepareRuntimeProviderRequest(runtime, {
+    ...input,
+    tools: input.tools.filter((tool) => tool.name !== "WebFetch"),
+    entries,
+    toolExposureEntries: activeEntries,
+  });
+  expect(denied.request.tools.some((tool) => tool.name === "WebFetch")).toBe(false);
+});
 
 const model = (enabled: boolean): Model => ({
   ...createTestRuntimeModel({

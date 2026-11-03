@@ -23,17 +23,17 @@ Goal: reduce any hook problem to a single concrete fix.
 
 (A plugin file uses the outer `hooks` wrapper; the configuration file uses `hooks.events.<Event>`. The inner array is the same.)
 
-- **Event names (exactly seven)**: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `Stop`. Any other name is an unsupported event. (Events such as `Notification`, `SubagentStop`, and `PreCompact` are **not** supported.)
+- **Event names (exactly nine)**: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `PreCompact`, `PostCompact`, `Stop`. Any other name is an unsupported event. (Events such as `Notification` and `SubagentStop` are **not** supported.)
 - **The matcher is a case-sensitive regular expression**, tested against the event's match value:
   - `SessionStart` → one of `startup`, `resume`, `clear`, `compact`
   - Tool events (`PreToolUse`, `PostToolUse`, `PermissionRequest`, `PostToolUseFailure`) → the **tool name** (`Bash`, `Read`, `Write`, `Edit`, `Agent`, …), with aliases `Task` ↔ `Agent` and `Write`/`Edit` ← `ApplyPatch`
-  - `UserPromptSubmit` → the prompt text; `Stop` → the response preview
+  - `PreCompact` / `PostCompact` → the compact trigger (`manual`, `auto`, `reactive`); `UserPromptSubmit` → the prompt text; `Stop` → the response preview
   - An omitted matcher matches everything; an invalid regular expression never matches (silently)
 - **`type: "command"`**: `command` (a shell string); optional `shell`, `timeout` (in **seconds**), `timeoutMs` (in milliseconds, takes precedence), and `statusMessage`. Note that `async` currently has no runtime effect.
 - **`type: "process"`**: `command` (an executable) plus `args[]` (an argument vector run without a shell, the most portable choice), `timeoutMs` (in **milliseconds**), and `statusMessage`.
 - Timeout resolution: `timeoutMs` → `timeout × 1000` → the configuration's `timeoutMs` → a default of 60000 ms.
 - Template variables (expanded in the command and each argument, and also injected as environment variables): `${CLAUDE_PROJECT_DIR}` / `${ZCODE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`; and, for plugin hooks only, `${CLAUDE_PLUGIN_ROOT}` / `${ZCODE_PLUGIN_ROOT}` and the plugin data directory. Note that a skill-directory variable is not valid in a hook and raises an error.
-- **Hook output**: standard output is parsed as JSON (a strict schema — any extra key fails validation), or you may use exit codes: `0` passes, `2` blocks (a deny for `PreToolUse`/`PermissionRequest`), and any other non-zero raises an error. `additionalContext` is injected into the conversation; `PreToolUse` may return a permission decision of `allow`/`ask`/`deny`; `Stop` may request continuation (up to three times).
+- **Hook output**: standard output is parsed as JSON (a strict schema — any extra key fails validation), or you may use exit codes: `0` passes, `2` blocks (a deny for `PreToolUse`/`PermissionRequest`), and any other non-zero raises an error. `additionalContext` is injected into the conversation for lifecycle events; for `PreCompact` it is merged into the summary request instructions instead of becoming a chat attachment, and for `PostCompact` it is injected as a `hook_context` reminder in the next request. `PreCompact` may return `compactionSummary` to skip the model summary request, or `continue: false` / `decision: "block"` to cancel the compaction (the turn continues, no boundary is written); `PostCompact` cannot rewrite the already-persisted summary or boundary; `PreToolUse` may return a permission decision of `allow`/`ask`/`deny`; `Stop` may request continuation (up to three times).
 
 ## 3. How to inspect hooks
 
@@ -44,7 +44,7 @@ Goal: reduce any hook problem to a single concrete fix.
 ## 4. Common pitfalls (symptom → cause → fix)
 
 1. **Configuration-file hooks do not run** — you added `hooks.events.*` but nothing fires. They are disabled by default and are enabled automatically only when a plugin hook is present. → Set `"hooks": { "enabled": true, ... }` in the configuration.
-2. **Wrong event name** — the hook never triggers. → Use exactly one of the seven supported events.
+2. **Wrong event name** — the hook never triggers. → Use exactly one of the nine supported events.
 3. **Matcher does not match (tool name, case, or regex)** — it is registered but never fires for the tool you expect. The matcher is a case-sensitive regular expression; `"bash"` will not match `Bash`, and an invalid expression never matches. → Use the exact tool name or a correct expression (for example `"Edit|Write"`), or omit the matcher to match all. Remember the aliases `Task` → `Agent` and `Write`/`Edit` → `ApplyPatch`.
 4. **Script is not executable** — `permission denied`, with a failed outcome. The script was installed without the executable bit. → Run `chmod +x` on it, or invoke it through an interpreter, e.g. `{"type":"command","command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/x.sh\""}`, so the executable bit is irrelevant.
 5. **Template variable not expanded** — a literal `${...}` or an empty path. Only recognized variables are expanded; a skill-directory variable raises an error inside a hook, and `${CLAUDE_PLUGIN_ROOT}` is available only for plugin hooks. → Use only supported variables, and `${CLAUDE_PLUGIN_ROOT}` for plugin-relative paths.
@@ -60,7 +60,7 @@ Goal: reduce any hook problem to a single concrete fix.
 
 1. **Is a runner active?** Confirm that either `hooks.enabled: true` is set in the configuration or at least one plugin contributes a hook; otherwise no runner exists and every hook is skipped.
 2. **Enumerate what is registered.** In **Settings → Plugin Management**, open the plugin's detail view and confirm the hook you expect is present and runnable, and that its plugin is enabled. For configuration hooks, read the `hooks` block directly.
-3. **Event name and matcher.** Check against the seven events; confirm the match value and the case-sensitive expression; test by omitting the matcher (which matches everything).
+3. **Event name and matcher.** Check against the nine events; confirm the match value and the case-sensitive expression; test by omitting the matcher (which matches everything).
 4. **Executable and interpreter.** Confirm the script has its executable bit, or invoke it explicitly via `bash`/`node`.
 5. **Run it by hand.** Feed a sample hook input to the script and inspect the exit code and output — `0` plus valid JSON is healthy, `2` is a deliberate block, any other non-zero is a failure.
 6. **Observe live.** Trigger the event and read the hook run records in the log (outcome, duration, error-stream preview) to distinguish a timeout from a failure from a block.

@@ -3,6 +3,7 @@ import {
   CompactReason,
   CompactTrigger,
   CoreErrorType,
+  createCoreError,
   DEFAULT_COMPACT_CONTEXT_WINDOW,
   SessionEventType,
   createModelUsageSummaryFromEvents,
@@ -214,6 +215,17 @@ export async function autoCompactIfNeeded(
   });
 
   if (!decision.shouldCompact) {
+    if (decision.reason === "circuit_breaker") {
+      // 熔断不能伪装成普通跳过，否则连续失败后会再次向模型发送未压缩上下文。
+      throw createCoreError(
+        CoreErrorType.InvalidStateTransition,
+        "Automatic compaction is paused after repeated failures. Resolve the error and run /compact, or switch to a larger context window.",
+        {
+          recoverable: true,
+          context: { consecutiveFailures: this.autoCompactConsecutiveFailures },
+        },
+      );
+    }
     this.logger?.debug("Auto compact skipped", {
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.auto.skipped",
@@ -283,7 +295,6 @@ export async function autoCompactIfNeeded(
       return "skipped";
     }
     context.turnRequestState.entries = compactResult.entries;
-    this.autoCompactConsecutiveFailures = 0;
     this.logger?.info("Auto compact completed", {
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.auto.completed",
@@ -295,22 +306,13 @@ export async function autoCompactIfNeeded(
     });
     return "compacted";
   } catch (error) {
+    // 提交前异常也不能降级为继续发送原历史；只统计真正的失败，原错交给 turn 收口。
+    if (this.pendingCommittedCompactApply) throw error;
     if (isTurnCancellationError(error, abortSignal)) {
       throw error;
     }
     this.autoCompactConsecutiveFailures++;
-    this.logger?.warn("Auto compact failed", {
-      ...traceContextToLogContext(turnTraceContext),
-      errorMessage: error instanceof Error ? error.message : String(error),
-      event: "compact.auto.failed",
-      failureCount: this.autoCompactConsecutiveFailures,
-      compactReason: context.compactReason,
-      modelStepIndex: context.modelStepIndex,
-      module: "core.runtime",
-      phase: context.phase,
-      ...autoCompactDecisionLogContext(decision),
-    });
-    return "failed";
+    throw error;
   }
 }
 
@@ -440,7 +442,6 @@ export async function reactiveCompactAfterContextExceeded(
       return "skipped";
     }
     context.turnRequestState.entries = compactResult.entries;
-    this.autoCompactConsecutiveFailures = 0;
     this.logger?.info("Reactive compact completed; retrying model request", {
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.reactive.completed",
@@ -450,19 +451,12 @@ export async function reactiveCompactAfterContextExceeded(
     });
     return "compacted";
   } catch (error) {
+    // 原始摘要错误必须向上传播，不能只保留先前的上下文溢出错误。
+    if (this.pendingCommittedCompactApply) throw error;
     if (isTurnCancellationError(error, abortSignal)) {
       throw error;
     }
     this.autoCompactConsecutiveFailures++;
-    this.logger?.warn("Reactive compact failed after model context overflow", {
-      ...traceContextToLogContext(turnTraceContext),
-      errorMessage: error instanceof Error ? error.message : String(error),
-      event: "compact.reactive.failed",
-      failureCount: this.autoCompactConsecutiveFailures,
-      modelStepIndex: context?.modelStepIndex,
-      module: "core.runtime",
-      rapidRefillCount: context?.rapidRefillCount,
-    });
-    return "failed";
+    throw error;
   }
 }

@@ -4,7 +4,7 @@ import {
   createStreamTextOptions,
   shouldIncludeStreamResponseBody,
 } from "../src/model/runner-options.js";
-import { isOpenCodeGoBaseUrl } from "../src/model/opencode-session.js";
+import { isOpenCodeGoBaseUrl, unwrapProxiedBaseUrl } from "../src/model/opencode-session.js";
 import type { ResolvedAiSdkModel } from "../src/model/runner-runtime.js";
 
 function resolved(partial: Partial<ResolvedAiSdkModel>): ResolvedAiSdkModel {
@@ -50,13 +50,55 @@ describe("isOpenCodeGoBaseUrl", () => {
   );
 
   it.each([
+    "https://opencode.ai/inference/go/openai/v1",
+    "https://opencode.ai/inference/go/openai/v1/",
+  ])("matches the inference Go endpoint: %s", (baseURL) => {
+    expect(isOpenCodeGoBaseUrl(baseURL)).toBe(true);
+  });
+
+  it.each([
+    "http://127.0.0.1:18787/bili/https://opencode.ai/zen/go/v1",
+    "http://127.0.0.1:18787/bili/https://opencode.ai/inference/go/openai/v1",
+    "http://localhost:18787/bili/https%3A%2F%2Fopencode.ai%2Finference%2Fgo%2Fopenai%2Fv1",
+  ])("sees through a local proxy wrapped baseURL: %s", (baseURL) => {
+    expect(isOpenCodeGoBaseUrl(baseURL)).toBe(true);
+  });
+
+  it.each([
     "https://opencode.ai/zen/v1",
     "https://opencode.ai/zen/go/v2",
     "https://opencode.ai.example/zen/go/v1",
+    "http://127.0.0.1:18787/bili/https://api.example.com/inference/go/openai/v1",
+    "http://127.0.0.1:18787/proxy/https://opencode.ai/inference/go/openai/v1",
+    "http://127.0.0.1:18787/bili/not-a-url",
     "not a url",
     undefined,
   ])("rejects unrelated OpenCode endpoints: %s", (baseURL) => {
     expect(isOpenCodeGoBaseUrl(baseURL)).toBe(false);
+  });
+});
+
+describe("unwrapProxiedBaseUrl", () => {
+  it("returns the original url when no proxy prefix is present", () => {
+    expect(unwrapProxiedBaseUrl("https://opencode.ai/inference/go/openai/v1")).toBe(
+      "https://opencode.ai/inference/go/openai/v1",
+    );
+  });
+
+  it("unwraps a bili style prefix on loopback hosts only", () => {
+    expect(
+      unwrapProxiedBaseUrl(
+        "http://127.0.0.1:18787/bili/https://opencode.ai/inference/go/openai/v1?x=1",
+      ),
+    ).toBe("https://opencode.ai/inference/go/openai/v1?x=1");
+    expect(
+      unwrapProxiedBaseUrl("https://example.com/bili/https://opencode.ai/zen/go/v1"),
+    ).toBe("https://example.com/bili/https://opencode.ai/zen/go/v1");
+  });
+
+  it("returns undefined for unparsable input", () => {
+    expect(unwrapProxiedBaseUrl("not a url")).toBeUndefined();
+    expect(unwrapProxiedBaseUrl("  ")).toBeUndefined();
   });
 });
 

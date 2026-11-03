@@ -50,7 +50,7 @@ export interface RapidRefillDecision {
   toolTurnsSinceCompact: number;
 }
 
-export type CompactAttemptOutcome = "skipped" | "compacted" | "failed";
+export type CompactAttemptOutcome = "skipped" | "compacted";
 
 export type AutoCompactOutcome = CompactAttemptOutcome | "rapid_refill_blocked";
 

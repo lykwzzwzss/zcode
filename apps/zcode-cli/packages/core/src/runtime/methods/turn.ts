@@ -2,6 +2,7 @@ import { beginLocalTurnPreparation, type LocalTtftDetail } from "@zcode/contract
 import { runtimeInputMetadata } from "../../agent/runtime-input-presentation.js";
 import { refreshWorkspaceTrustAdmission } from "./mcp.js";
 import { withConversationQuotes } from "../helpers/conversation-quotes.js";
+import { withMessageId } from "../../agent/message-history.js";
 import {
   ensureGroupTaskPermissionScope,
   telemetryInputOrigin,
@@ -56,6 +57,7 @@ import type { PromptRuntimeCommand } from "../command-queue.js";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
 import { buildReferencedSessionContextReminderBody } from "../../session-context/read-session-context.js";
 import { runRegularTurnLoop } from "./turn-loop.js";
+import { recoverCommittedCompactApply } from "./compact-active-helpers.js";
 import { appendInterruptMarker } from "./interrupt-marker.js";
 import {
   maybeStartDeferredSessionTitleGeneration,
@@ -142,6 +144,8 @@ export async function executeTurnCommand(
   options?: ExecuteTurnOptions,
   startReservation?: ActiveTurnStartReservation,
 ): Promise<TurnResult> {
+  // 上一次提交若在活跃历史上应用失败，必须在冻结本轮事实前收敛，不能继续使用旧历史。
+  recoverCommittedCompactApply(this);
   // 普通 Turn 过去在异步初始化完成后才读取 Session Selection/输出样式，
   // 初始化期间发生的切模会越过 admission 边界，错误影响已经开始的 Turn。
   // 这里在任何 await 之前冻结本轮事实；后续配置变化只作用于下一轮。
@@ -681,10 +685,12 @@ export async function executeTurnCommand(
         if (options?.skipInputRecord !== true && options?.inputVisibility === "model-only") {
           const inputSource = options.inputSource ?? "goal-continuation";
           const userContent = buildUserContentFromTurn(input, resolvedAttachments);
+          // model-only 输入同样以 userMessageId 落库；带上 id 后每轮索引才能指向这条消息。
           this.messageHistory.addUser(
             userContent,
             runtimeInputMetadata(options.inputPresentation) ??
               runtimeMetadataForSyntheticUserMessageSource(inputSource),
+            userMessageId,
           );
           // /goal 自动续跑是 runtime 注入给模型的内部 user-role 输入，
           // 不是用户在聊天里新发的一条消息。持久化时保留 raw 输入供恢复/排查使用，
@@ -706,26 +712,31 @@ export async function executeTurnCommand(
           });
         } else if (options?.skipInputRecord !== true) {
           this.messageHistory.addEntries(
-            buildRuntimeUserEntriesFromTurn(
-              withConversationQuotes(
-                input,
-                options?.intent?.conversationQuotes,
-                options?.intent?.botGroupSource,
-              ),
-              resolvedAttachments,
-              {
-                browserAmbientContext: options?.browserAmbientContext,
-                genUiContext: options?.intent?.genUiContext,
-              },
-            ).map((entry) => {
-              const metadata = runtimeInputMetadata(options?.inputPresentation);
-              // 合并而不是替换：输入 entry 上还挂着页面状态（genUiState）。
-              // 修复原因：整体替换会删掉它，抢占运行中轮次的立即发送在热态请求里丢失页面状态，
-              // 冷恢复按合并恢复又带上，前后请求不一致。写法与冷恢复相同。
-              return entry.kind !== "attachment" && metadata
-                ? { ...entry, metadata: { ...entry.metadata, ...metadata } }
-                : entry;
-            }),
+            withMessageId(
+              buildRuntimeUserEntriesFromTurn(
+                withConversationQuotes(
+                  input,
+                  options?.intent?.conversationQuotes,
+                  options?.intent?.botGroupSource,
+                ),
+                resolvedAttachments,
+                {
+                  browserAmbientContext: options?.browserAmbientContext,
+                  genUiContext: options?.intent?.genUiContext,
+                },
+              ).map((entry) => {
+                const metadata = runtimeInputMetadata(options?.inputPresentation);
+                // 合并而不是替换：输入 entry 上还挂着页面状态（genUiState）。
+                // 修复原因：整体替换会删掉它，抢占运行中轮次的立即发送在热态请求里丢失页面状态，
+                // 冷恢复按合并恢复又带上，前后请求不一致。写法与冷恢复相同。
+                return entry.kind !== "attachment" && metadata
+                  ? { ...entry, metadata: { ...entry.metadata, ...metadata } }
+                  : entry;
+              }),
+              // 与 persistUserPrompt 使用同一个 id：每轮索引里的 user 行才能被
+              // SearchContext / DecompressContext 精确解析。附件 entry 会被跳过。
+              userMessageId,
+            ),
           );
           // /init 和自定义 slash command 会把模型输入展开成较长的内部
           // prompt。模型可见的历史必须使用展开后的 input，但 UI 展示、会话标题和
@@ -893,6 +904,9 @@ export async function executeTurnCommand(
           completeTurnPhase("regular_turn_loop", phaseStartedAt);
         } finally {
           finishOutputTokenRecovery(loopState.turnRequestState);
+          // 模型排队的折叠只在排它的那一轮安全点生效；turn 因 abort / 模型错误早退时
+          // 请求会留在 runtime 上，让下一轮开头突然压一次（还带着上一轮的 instructions）。
+          this.pendingCompactRequest = undefined;
           await closeGoalStateChangeReminderDeferral.call(this, activeTurn, turnTraceContext);
         }
         turnMachine = loopState.turnMachine;

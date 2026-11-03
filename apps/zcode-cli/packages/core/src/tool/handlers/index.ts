@@ -63,6 +63,12 @@ import { fillWorkflowHoleToolEntry } from "./fill-workflow-hole.js";
 import { taskOutputToolEntry } from "./task-output.js";
 import { taskStopToolEntry } from "./task-stop.js";
 import { readSessionContextToolEntry } from "./read-session-context.js";
+// 会话记忆四件套：模型自决折叠 + 召回被折叠的原文。
+// 与 ReadSessionContext 的区别是它们直读 SQLite 原始 transcript，不走折叠后视角。
+import { searchContextToolEntry } from "./search-context.js";
+import { decompressContextToolEntry } from "./decompress-context.js";
+import { compactStatusToolEntry } from "./compact-status.js";
+import { compactNowToolEntry } from "./compact-now.js";
 import { amendWorkflowToolEntry } from "./amend-workflow.js";
 import { createWorkflowToolEntry } from "./create-workflow.js";
 import { saveWorkflowToolEntry } from "./save-workflow.js";
@@ -113,6 +119,12 @@ export const builtInTools: ToolEntry[] = [
   taskOutputToolEntry,
   taskStopToolEntry,
   readSessionContextToolEntry,
+  // 折叠记忆族：检索/解压/状态永远可用（只读），CompactNow 由端口门控——
+  // 子代理运行时拿不到 compactControlPort，注册了也只会返回 rejected。
+  searchContextToolEntry,
+  decompressContextToolEntry,
+  compactStatusToolEntry,
+  compactNowToolEntry,
   // 渠道回复等待插件入口接入；仅注释默认注册，保留完整实现。
   // replyToChannelToolEntry,
   agentToolEntry,

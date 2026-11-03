@@ -1,5 +1,10 @@
 import type { BackgroundBashOutputResult } from "@zcode/shared";
-import type { ModelToolContract, RuntimeInputPresentation } from "@zcode/contracts";
+import type {
+  CompactCacheUsage,
+  CompactRangeInput,
+  ModelToolContract,
+  RuntimeInputPresentation,
+} from "@zcode/contracts";
 import type {
   CompactPhase,
   CompactReason,
@@ -217,6 +222,7 @@ export interface AgentRuntimeTurnMethods {
       agentListingTools?: readonly { name: string }[];
       activeEntries?: readonly RuntimeMessageEntry[];
       getContinuationTools?: () => readonly ModelToolContract[];
+      ranges?: readonly CompactRangeInput[];
     },
   ): Promise<{
     displayText: string;
@@ -367,6 +373,10 @@ export interface AgentRuntimeTurnMethods {
       operationId?: string;
       leadingReminderEntries?: readonly RuntimeMessageEntry[];
       postCompactReminderEntries?: readonly RuntimeMessageEntry[];
+      /** 增量折叠保留的上一代摘要正文；随本组一起落盘，冷恢复按 id 放回。 */
+      retainedSummaries?: readonly string[];
+      /** 本次折叠摘要请求的 token 用量（含缓存读写）；provider 未上报时缺省。 */
+      cacheUsage?: CompactCacheUsage;
     },
   ): Promise<void>;
   persistUserPrompt(

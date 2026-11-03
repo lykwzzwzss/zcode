@@ -1,4 +1,9 @@
 import {
+  CompactNowOutputSchema,
+  CompactStatusOutputSchema,
+  DecompressContextOutputSchema,
+  SearchContextOutputSchema,
+  nativeContextDisplaySchema,
   RESPOND_TO_COORDINATOR_TOOL_NAME,
   RespondToCoordinatorOutputSchema,
   MCP_TOOL_DISPLAY_MAX_DESCRIPTION_CHARS,
@@ -180,6 +185,8 @@ export function createToolResultDisplay(
     mcp?: McpToolDisplayMetadata;
   },
 ): ToolResultDisplayPayload | undefined {
+  const nativeContext = createNativeContextDisplay(toolName, output);
+  if (nativeContext) return nativeContext;
   if (toolName === "Bash") return createBashResultDisplay(output);
 
   const cuaToolName = readCuaToolName(toolName);
@@ -534,4 +541,105 @@ function boundDiffHunks(hunks: DiffHunk[]): { patch: DiffHunk[]; truncated: bool
   }
 
   return { patch: bounded, truncated };
+}
+
+const MAX_ITEMS = 40;
+const MAX_CHILDREN = 8;
+const MAX_ID = 128;
+const MAX_TEXT = 1_200;
+
+function text(value: string | undefined, limit: number): string | undefined {
+  if (value === undefined) return undefined;
+  const result = value.slice(0, limit);
+  const last = result.charCodeAt(result.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? result.slice(0, -1) : result;
+}
+
+/** 展示载荷独立限额；模型输出和归档原文不受影响。 */
+export function createNativeContextDisplay(
+  toolName: string,
+  output: unknown,
+): ToolResultDisplayPayload | undefined {
+  let projection: Record<string, unknown>;
+  if (toolName === "CompactNow") {
+    const parsed = CompactNowOutputSchema.safeParse(output);
+    if (!parsed.success) return undefined;
+    projection = {
+      ...parsed.data,
+      message: text(parsed.data.message, MAX_TEXT),
+      reason: text(parsed.data.reason, MAX_ID),
+    };
+  } else if (toolName === "SearchContext") {
+    const parsed = SearchContextOutputSchema.safeParse(output);
+    if (!parsed.success) return undefined;
+    const data = parsed.data;
+    projection = {
+      status: data.status,
+      query: text(data.query, 4_000),
+      searchedMessageCount: data.searchedMessageCount,
+      foldedMessageCount: data.foldedMessageCount,
+      truncated: data.truncated,
+      nextCursor: text(data.nextCursor, 4_096),
+      error: text(data.error, MAX_TEXT),
+      displayTruncated:
+        data.matches.length > MAX_ITEMS || data.matches.some((m) => m.snippet.length > MAX_TEXT),
+      matches: data.matches.slice(0, MAX_ITEMS).map((m) => ({
+        ...m,
+        messageId: text(m.messageId, MAX_ID),
+        summaryMessageId: text(m.summaryMessageId, MAX_ID),
+        boundaryId: text(m.boundaryId, MAX_ID),
+        snippet: text(m.snippet, MAX_TEXT),
+      })),
+    };
+  } else if (toolName === "CompactStatus") {
+    const parsed = CompactStatusOutputSchema.safeParse(output);
+    if (!parsed.success) return undefined;
+    const data = parsed.data;
+    projection = {
+      status: data.status,
+      messageCount: data.messageCount,
+      activeMessageCount: data.activeMessageCount,
+      foldedMessageCount: data.foldedMessageCount,
+      lastCompactAt: data.lastCompactAt,
+      nextCursor: text(data.nextCursor, 4_096),
+      error: text(data.error, MAX_TEXT),
+      // 归档游标已经越过整页，展示侧不能独立截断节点，否则后续页永远取不回被略过的项。
+      displayTruncated: data.ranges.some((r) => (r.childBoundaryIds?.length ?? 0) > MAX_CHILDREN),
+      ranges: data.ranges.map((r) => ({
+        ...r,
+        boundaryId: text(r.boundaryId, MAX_ID),
+        messageId: text(r.messageId, MAX_ID),
+        summaryMessageId: text(r.summaryMessageId, MAX_ID),
+        lastSummarizedMessageId: text(r.lastSummarizedMessageId, MAX_ID),
+        trigger: text(r.trigger, MAX_ID),
+        phase: text(r.phase, MAX_ID),
+        childBoundaryIds: r.childBoundaryIds?.slice(0, MAX_CHILDREN).map((id) => text(id, MAX_ID)),
+      })),
+    };
+  } else if (toolName === "DecompressContext") {
+    const parsed = DecompressContextOutputSchema.safeParse(output);
+    if (!parsed.success) return undefined;
+    const data = parsed.data;
+    projection = {
+      status: data.status,
+      tier: data.tier,
+      boundaryId: text(data.boundaryId, MAX_ID),
+      summaryMessageId: text(data.summaryMessageId, MAX_ID),
+      messageCount: data.messageCount,
+      content: text(data.content, MAX_TEXT),
+      truncated: data.truncated,
+      displayTruncated: data.content.length > MAX_TEXT,
+      filePath: text(data.filePath, 4_096),
+      bytesWritten: data.bytesWritten,
+      nextCursor: text(data.nextCursor, 4_096),
+      error: text(data.error, MAX_TEXT),
+    };
+  } else return undefined;
+
+  const parsedDisplay = nativeContextDisplaySchema.safeParse({
+    kind: "native_context",
+    toolName,
+    output: projection,
+  });
+  return parsedDisplay.success ? parsedDisplay.data : undefined;
 }

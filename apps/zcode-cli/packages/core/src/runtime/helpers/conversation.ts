@@ -1,7 +1,7 @@
 import { getConversationModelOnlyTurnTriggerSource } from "@zcode/shared";
 import type { GenUiModelContext } from "@zcode/shared/gen-ui";
 import { attachGenUiContext } from "../../agent/message-history.js";
-import { activeSessionMessages, modelMessageContentToText } from "../deps.js";
+import { modelMessageContentToText } from "../deps.js";
 import { buildPromptAttachmentBlocks } from "../../system-reminder/prompt-attachment.js";
 import {
   buildUserMessageEntries,
@@ -33,20 +33,12 @@ export function isHiddenReminderMessage(message: MessageWithParts): boolean {
   );
 }
 
-export function getLatestActiveSessionMessageId(
-  messages: MessageWithParts[],
-  options: {
-    branchCutAfterMessageId?: MessageId;
-    rewindCreatedMessageId?: MessageId;
-    rewindKeptMessageIds?: readonly MessageId[];
-    rewindTargetMessageId?: MessageId;
-  } = {},
+/** 调用方已选定不含 preserved segment 的活跃时间线；这里只查找，不再重放压缩。 */
+export function getLatestConversationMessageId(
+  activeMessages: readonly MessageWithParts[],
 ): MessageId | undefined {
-  const activeMessages = activeSessionMessages(messages, {
-    ...options,
-    includeCompactPreservedSegment: false,
-  });
-
+  // 根因：resume/rewind 已做过 activeSessionMessages，再做一次会因原文端点已被替换而报损坏；
+  // 旧 warn+全量回退掩盖了这个重复重放错误。活跃链的选择只由调用方负责。
   for (let index = activeMessages.length - 1; index >= 0; index--) {
     const message = activeMessages[index]!;
     // 与 live 一致：隐藏提醒不移动对话指针。

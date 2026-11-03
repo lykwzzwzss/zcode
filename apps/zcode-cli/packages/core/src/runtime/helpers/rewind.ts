@@ -32,6 +32,8 @@ interface FileMutationCheckpointCandidate {
 
 interface RewindEvaluationItem {
   compactBoundary?: CompactBoundaryPayload;
+  /** ranges-v1：该边界只折这一段；rewind 判定不能再用「最后一个 boundary 之前」的旧规则。 */
+  compactRange?: { endMessageId: string; startMessageId: string };
   id: string;
 }
 
@@ -177,9 +179,18 @@ export function buildMessageRewindEvaluationItems(
       return { id: message.info.id };
     }
 
+    const compactRange = compactionPart.metadata?.compactRange;
     return {
       id: message.info.id,
       compactBoundary: parseCompactBoundaryPayload(compactionPart.compactBoundary),
+      ...(compactRange
+        ? {
+            compactRange: {
+              endMessageId: compactRange.endMessageId,
+              startMessageId: compactRange.startMessageId,
+            },
+          }
+        : {}),
     };
   });
 }

@@ -9,6 +9,7 @@ import {
 import { persistSubagentMessageCommand } from "./subagent-messages.js";
 import { isStaleBranchRuntimeCommand } from "./runtime-command-generation.js";
 import { createRuntimeUserEntry, type RuntimeMessageEntry } from "../../agent/message-history.js";
+import { recoverCommittedCompactApply } from "./compact-active-helpers.js";
 
 export interface ActiveLoopRuntimeCommandDrainResult {
   backgroundSubagentResultConsumed: boolean;
@@ -38,6 +39,8 @@ export async function drainPendingRuntimeCommandsForActiveLoop(
     if (command.mode !== "task-notification" && command.mode !== "subagent-message") {
       continue;
     }
+    // 恢复失败时命令尚未出队；当前轮向上报错，消息可在恢复后继续处理。
+    recoverCommittedCompactApply(this);
     const removed = this.runtimeCommandQueue.removeById(command.id);
     if (!removed) continue;
     if (isStaleBranchRuntimeCommand(this, removed)) continue;

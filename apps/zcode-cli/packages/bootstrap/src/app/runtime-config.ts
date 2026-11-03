@@ -10,6 +10,7 @@ import {
   type HookMatcherConfig,
   type HooksRuntimeConfig,
   type McpServerConfig,
+  type PluginSystemPromptSection,
 } from "@zcode/contracts";
 import { omitMcpServers, resolveTrustedOfficialCuaServerNames } from "../mcp-config.js";
 import { resolveDefaultEmbeddedSearchBackend } from "./embedded-search-backend.js";
@@ -41,6 +42,8 @@ export function resolveAppRuntimeConfig(input: {
   pluginHooks?: Partial<Record<HookEventName, HookMatcherConfig[]>>;
   pluginMcpServers?: Record<string, McpServerConfig>;
   pluginRuntimeFeatures?: AgentRuntimeConfig["runtimeFeatures"];
+  /** 插件贡献的 system 段（adapters 已解析校验），透传给 runtime 注入 system 区。 */
+  pluginSystemPrompts?: readonly PluginSystemPromptSection[];
   subagentOutputRootDir: string;
   subagentProfiles?: readonly AgentProfile[];
   storageRoot?: string;
@@ -55,6 +58,7 @@ export function resolveAppRuntimeConfig(input: {
     builtInMcpServers,
     pluginMcpServers,
     pluginRuntimeFeatures,
+    pluginSystemPrompts,
     subagentOutputRootDir,
     subagentProfiles = [],
     workingDirectory,
@@ -147,6 +151,7 @@ export function resolveAppRuntimeConfig(input: {
         env: options.env,
       }),
     runtimeFeatures: pluginRuntimeFeatures,
+    pluginSystemPrompts,
     language: options.runtimeConfig?.language,
     titleGeneration,
     workingDirectory,

@@ -3,18 +3,22 @@ const NO_TOOLS_PREAMBLE = `CRITICAL: Respond with TEXT ONLY. Do NOT call any too
 - Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
 - You already have all the context you need in the conversation above.
 - Tool calls will be REJECTED and will waste your only turn — you will fail the task.
-- Your entire response must be plain text: an <analysis> block followed by a <summary> block.
+- Your entire response must be a <summary> block. Do not output analysis or a reasoning transcript.
+- Aim for 2K-4K tokens of summary text; use more only to preserve essential constraints or exact identifiers.
 
 `;
 
 const NO_TOOLS_TRAILER =
   "\n\nREMINDER: Do NOT call any tools. Respond with plain text only — " +
-  "an <analysis> block followed by a <summary> block. Tool calls will be rejected and you will fail the task.";
+  "a <summary> block only, without analysis. Tool calls will be rejected and you will fail the task.";
 
+// 折叠后摘要读起来像「已收尾的工作记录」，用户尚未完成的请求会被当成历史，模型不再推进。
+// 单列 Open objectives 一节，把仍然有效但未完成的用户目标连同进度写进摘要，让折叠后的请求继续有约束力。
+// 限制词数并禁止推测，是为了让这一节可预测、不自发膨胀，避免每轮多花上下文。
 const BASE_COMPACT_PROMPT = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
 
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+Review the following points internally before writing the summary. Output only the final summary:
 
 1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
    - The user's explicit requests and intents
@@ -42,14 +46,11 @@ Your summary should include the following sections:
 8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
 9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
                        If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.
+10. Open objectives: List only work the user explicitly asked for that is not yet done. For each, state the objective, current progress, and the next step, citing the message number in the "All user messages" list when you can (for example, "user message 3"). Do not list objectives the user already finished, cancelled, or replaced with a later instruction, and do not infer objectives the user never stated. Keep this section under 120 words; if nothing is open, write "Open objectives: none".
 
 Here's an example of how your output should be structured:
 
 <example>
-<analysis>
-[Your thought process, ensuring all points are covered thoroughly and accurately]
-</analysis>
-
 <summary>
 1. Primary Request and Intent:
    [Detailed description]
@@ -91,6 +92,9 @@ Here's an example of how your output should be structured:
 
 9. Optional Next Step:
    [Optional Next step to take]
+
+10. Open objectives:
+   [Objective, current progress, next step — or "Open objectives: none"]
 
 </summary>
 </example>
@@ -152,6 +156,7 @@ export function buildCompactSummaryMessage(
     replStateCleared?: boolean;
     suppressFollowup?: boolean;
     transcriptPath?: string;
+    retrievalToolsAvailable?: boolean;
   } = {},
 ): string {
   let message = `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
@@ -160,6 +165,18 @@ ${formattedSummary}`;
 
   if (options.transcriptPath) {
     message += `\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: ${options.transcriptPath}`;
+  }
+
+  // 摘要里的目标容易被读成「历史记录」而不是仍然有效的指令。这句把 Open objectives
+  // 定义为持续有效的授权：被折叠不等于被撤回，也不需要用户重新确认他已经同意过的工作。
+  message +=
+    '\n\nObjectives listed under "Open objectives" in the summary stay in force until the user completes, cancels, or supersedes them: do not drop them just because they were folded away, and do not ask the user to re-authorize work they already authorized.';
+
+  // 摘要不会提到「原文还能取回」。不写这句，模型只能靠延迟工具的目录自己想起来，
+  // 实际上就是不会去用。
+  if (options.retrievalToolsAvailable) {
+    message +=
+      "\n\nEarlier turns are not gone: SearchContext searches the durable session transcript (including folded messages, marked as (folded)), and DecompressContext restores the original text of a folded range into the conversation. Use them when you need a detail this summary compressed away.";
   }
 
   if (options.replStateCleared) {

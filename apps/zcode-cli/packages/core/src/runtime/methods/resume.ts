@@ -26,7 +26,7 @@ import type {
   TurnState,
   ToolSchedule,
 } from "../deps.js";
-import { getLatestActiveSessionMessageId, isHiddenReminderMessage } from "../helpers/index.js";
+import { getLatestConversationMessageId, isHiddenReminderMessage } from "../helpers/index.js";
 import type { ResumeSessionOptions, ResumeSessionResult } from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import {
@@ -136,6 +136,8 @@ export async function resumeFromStore(
   }
   resetProjectMemoryRecall(this);
   this.messageHistory = new MessageHistoryImpl();
+  // 冷恢复以存储为唯一事实来源，旧的应用重放输入不得覆盖刚重建的历史。
+  this.pendingCommittedCompactApply = undefined;
   this.contextBuilder = null;
   this.contextInitialized = false;
   // cold resume 的历史 hydration 会先清空 runtime-local read-state；必须在
@@ -193,7 +195,7 @@ export async function resumeFromStore(
   const latestAssistant = [...timelineActiveMessages]
     .reverse()
     .find((message) => message.info.role === "assistant");
-  this.latestConversationMessageId = getLatestActiveSessionMessageId(timelineActiveMessages);
+  this.latestConversationMessageId = getLatestConversationMessageId(timelineActiveMessages);
   this.latestAssistantMessageId = latestAssistant?.info.id;
   this.latestAssistantTurnId = latestAssistant?.info.anchor?.turnId as TurnId | undefined;
   this.lastAssistantCompletedAtMs =

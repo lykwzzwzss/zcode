@@ -18,6 +18,16 @@ const ENOUGH_MESSAGES = [
 ];
 
 describe("auto compact policy", () => {
+  it("does not trip the failure breaker when the current context is below threshold", () => {
+    expect(
+      shouldAutoCompact({
+        messages: ENOUGH_MESSAGES,
+        config: { contextWindow: 200_000, maxConsecutiveFailures: 2 },
+        consecutiveFailures: 2,
+      }),
+    ).toMatchObject({ shouldCompact: false, reason: "below_threshold" });
+  });
+
   it("counts reasoning blocks in the local fallback estimate", () => {
     expect(
       estimateMessageTokens([

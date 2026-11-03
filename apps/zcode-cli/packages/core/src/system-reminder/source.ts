@@ -59,6 +59,11 @@ export const SYSTEM_REMINDER_PER_REQUEST_SOURCES = [
   "model_anomaly",
   "prompt_attachment",
   "diagnostics",
+  // 折叠增长提醒：只作用于当轮请求，不落历史（否则每次请求都会重现一条过时的水位提示）。
+  "compact_nudge",
+  "compact_result",
+  // 上下文消息索引：每轮按当前上下文重新生成，同样只作用于当轮请求，不落历史。
+  "context_index",
 ] as const;
 
 export type SystemReminderPersistedSource = (typeof SYSTEM_REMINDER_PERSISTED_SOURCES)[number];
@@ -209,6 +214,9 @@ const SYSTEM_REMINDER_DESCRIPTORS: Record<SystemReminderSource, DescriptorShape>
     "sr.shell_environment_change",
   ),
   diagnostics: descriptor("mid_turn_event", "mid_turn_event", true, "sr.diagnostics"),
+  compact_nudge: descriptor("current_turn", "per_current_turn", true, "sr.compact_nudge"),
+  compact_result: descriptor("current_turn", "per_current_turn", true, "sr.compact_result"),
+  context_index: descriptor("current_turn", "per_current_turn", true, "sr.context_index"),
   // 第四批 4a-0（2026-09-12）：原 plugin_ui_state 源已删除，插件给模型的信息改走 ui/update-model-context。
 };
 

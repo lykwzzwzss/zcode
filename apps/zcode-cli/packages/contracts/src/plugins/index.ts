@@ -40,6 +40,11 @@ export type PluginDiagnosticCode =
   | "plugin_hook_read_failed"
   | "plugin_hook_invalid"
   | "plugin_hook_unsupported_event"
+  | "plugin_system_prompt_invalid"
+  | "plugin_system_prompt_read_failed"
+  | "plugin_system_prompt_too_large"
+  | "plugin_system_prompt_outside_root"
+  | "plugin_system_prompt_budget_exceeded"
   | "plugin_dependency_invalid"
   | "plugin_dependency_missing"
   | "plugin_dependency_cycle"
@@ -161,6 +166,18 @@ export interface PluginManifest {
   repository?: string;
   settings?: unknown;
   skills?: unknown;
+  /**
+   * 插件贡献的 system 段正文（inline）。与 `systemPromptPath` 同时给出时以这里为准。
+   * adapters 侧校验大小与路径越界，聚合进 `PluginLoadOutcome.systemPrompts`。
+   */
+  systemPrompt?: unknown;
+  /** 插件贡献的 system 段正文文件，相对插件根目录（越界的绝对路径被拒绝）。 */
+  systemPromptPath?: unknown;
+  /**
+   * 多段 system 段声明：`[{ name?, order?, content? | path? }]`。
+   * 非对象条目只记诊断、不参与注入。
+   */
+  systemPrompts?: unknown;
   /** 插件 UI：`ui.surfaces[]` 面板入口声明，adapters 解析。 */
   ui?: unknown;
   userConfig?: Record<string, PluginUserConfigOption>;
@@ -273,6 +290,61 @@ export interface PluginReferenceCatalog {
   plugins: PluginReferenceCatalogEntry[];
 }
 
+/** 单段插件 system prompt 上限：32 KiB（与主流 CLI 的插件 systemPrompt 上限同口径）。 */
+export const PLUGIN_SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
+
+/** 全部启用插件的 system prompt 合计上限：64 KiB。adapters 与 runtime 共用这一口径。 */
+export const PLUGIN_SYSTEM_PROMPTS_TOTAL_MAX_BYTES = 64 * 1024;
+export const PLUGIN_SYSTEM_PROMPT_MAX_SECTIONS = 64;
+export const PLUGIN_SYSTEM_PROMPT_MAX_NAME_CHARS = 128;
+export const PLUGIN_SYSTEM_PROMPT_MAX_ID_CHARS = 512;
+
+/**
+ * 插件贡献的一个 system 段（adapters 已解析、已校验大小与路径）。
+ * 运行时按 `order` 升序追加到 system 段末尾；不改写 identity，也不替换
+ * `customSystemPrompt`。
+ */
+export interface PluginSystemPromptSection {
+  /** 段名，默认 `plugin:<pluginId>`。 */
+  name: string;
+  /** 段内排序权重（小在前）。 */
+  order: number;
+  /** 插件完整 ID（`<name>@<marketplace>`）。 */
+  pluginId: string;
+  /** 正文。 */
+  content: string;
+}
+
+/** 统一生成真正注入的正文与预算，避免 adapter 放行、Runtime 再用另一种算法裁剪。 */
+export function preparePluginSystemPrompt(
+  section: PluginSystemPromptSection,
+):
+  | { ok: true; body: string; content: string; bytes: number }
+  | { ok: false; reason: "invalid" | "too_large" } {
+  if (
+    !section.name ||
+    section.name.length > PLUGIN_SYSTEM_PROMPT_MAX_NAME_CHARS ||
+    !section.pluginId ||
+    section.pluginId.length > PLUGIN_SYSTEM_PROMPT_MAX_ID_CHARS ||
+    !Number.isFinite(section.order)
+  ) {
+    return { ok: false, reason: "invalid" };
+  }
+  const body = section.content.trim(),
+    encoder = new TextEncoder();
+  if (!body) return { ok: false, reason: "invalid" };
+  if (encoder.encode(body).length > PLUGIN_SYSTEM_PROMPT_MAX_BYTES)
+    return { ok: false, reason: "too_large" };
+  const escape = (value: string) =>
+    value
+      .replaceAll("&", "&amp;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+  const content = `<plugin_system_prompt name="${escape(section.name)}" plugin="${escape(section.pluginId)}">\n${body}\n</plugin_system_prompt>`;
+  return { ok: true, body, content, bytes: encoder.encode(content).length };
+}
+
 export interface PluginLoadOutcome {
   commandRoots: CustomCommandRoot[];
   diagnostics: PluginDiagnostic[];
@@ -282,6 +354,8 @@ export interface PluginLoadOutcome {
   pluginListingsById?: Record<string, PluginStoreListing>;
   plugins: PluginMetadata[];
   skillRoots: SkillRoot[];
+  /** 插件贡献的 system 段，按发现顺序稳定排列。 */
+  systemPrompts: PluginSystemPromptSection[];
 }
 
 export interface PluginDiscoverRequest {

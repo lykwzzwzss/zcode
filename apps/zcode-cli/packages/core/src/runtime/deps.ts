@@ -246,6 +246,7 @@ export type {
   RewindTargetEvaluation,
   WorkspaceCheckpointArtifact,
   CompletedToolPartMetadata,
+  PluginSystemPromptSection,
 } from "@zcode/contracts";
 export type { ToolCall, TurnAttachment, TurnState } from "../agent/turn-state.js";
 export {

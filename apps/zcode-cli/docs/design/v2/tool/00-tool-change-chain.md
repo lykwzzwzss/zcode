@@ -1,5 +1,31 @@
 # Tool Change Chain Spec
 
+DeepSeek Flash 续修（2026-11-03）：独立摘要净缩小检查、文件补回预算和窗口计量规则见
+[续修合同](../compact/native-context.md#续修合同2026-11-03)。CompactStatus 的 pre/post 是上下文
+估算，摘要 input/cache/output 是真实调用用量，分开展示。必要压缩无法缩小沿现有 TurnError
+链路暴露；手动正常 skipped 不伪造边界或修改旧 tool result，权限及交付协议不变。
+摘要取回说明、工具公告、压缩提醒和上下文索引均遵守本轮有效工具集合；索引只说明可调用的
+工具，相关工具全禁用则不生成。三类临时上下文提示留在请求尾部，不能改写缓存中的旧消息。
+
+DeepSeek Flash 原生压缩优化（2026-11-02）：CompactNow.ranges[].summary 可由主模型直接提供，
+经 strict schema → CompactControlPort → pendingCompactRequest → turn-loop 安全点 → ranges 规划
+及现有原子提交/重放进入活跃上下文。必须整批提供、精确匹配完整轮边界，最终不缩小时 skipped；
+无额外摘要请求和虚构模型用量，权限与 Desktop continuous / 手机 replayable 链路不变。
+独立摘要仅使用完整活跃历史推导工具发现，正文仍按选区投影；不得提升已被当前作用域移除的工具。
+DecompressContext 默认返回 10,000 字符，可显式扩大并按 cursor 继续。细节见
+[原生上下文合同](../compact/native-context.md#deepseek-v41-flash-成本优化2026-11-02)。
+
+原生上下文错误收口（2026-11-02）：SearchContext / DecompressContext / CompactStatus 的
+archive 与写文件异常不再转换成普通 `status:failed` 结果，而是上抛到既有 executor failure
+路径；端口显式 failed 也进入该路径。最终 success=false、ToolCallError、PostToolUseFailure
+与失败计量保持一致，正常 not_found/空页仍是成功调用。toFile 非法路径报 InvalidInput，
+缺失文件端口报 ConfigurationError。持久 tool part 与桌面/手机投影复用现有错误事件，
+不修改历史结果。冷恢复损坏记录报 SessionCorrupted，细节见 native-context.md。
+
+原生上下文复审修复（2026-11-02）：摘要重试的输入投影不改变实际折叠成员；原文/摘要正文与边界
+元数据按同一选择返回。读取先定位页内 part，再转换正文；summary.body 与中文词片检索在同一
+SQLite 实现中补齐。插件系统段预算覆盖完整包装字节并限制条目/名称，未恢复已删除的存储回退。
+
 工具 schema、顺序与描述是固定字节（tools 段字节进入缓存前缀）：`toToolJsonSchema` 按
 zod v4 toJSONSchema 的 key 顺序输出——`$schema` 在最前，`description`、`default` 在 `type` 前，
 数组的 `minItems`/`maxItems` 在 `type` 前，属性声明顺序不变；ToolSearch 输入 schema 走同一入口。
@@ -33,6 +59,78 @@ Memory 后台循环（Extraction、Dream）用同一个 `toolBatchModelEntries` 
 它的 executor 不配置 hooks，所以没有 Hook 上下文（见 [Memory](../memory/README.md)）。
 单条 context 超过 10000 字符时先落盘，附件里只放 `<persisted-output>` 外壳；落盘失败时截到 10000 字符并附原因
 （规则见 hooks.md「聚合规则」）。
+
+## CompactNow 选择性区间压缩（2026-11-02，P2/P3）
+
+读取路径收口（2026-11-02）：SearchContext / DecompressContext / CompactStatus 统一调用
+SessionStorePort.contextArchive。删除缺少该端口时的全量 messages() 回退、内存摘要选区和
+另一套渲染/预算逻辑；未配置端口时报 ConfigurationError。SQLite 中已有消息/摘要数据的
+读取规则仍由同一 adapter 负责，删除回退不删除用户会话，也不改变 toFile 权限。
+工具层测试只检查端口委托、错误/取消与文件权限，选区/分页/分支在真实 SQLite 测试中验证。
+
+原生 bili 扩展（2026-11-02）：ranges 允许声明式递归折叠旧摘要，层级/直接成员随 compaction
+metadata 原子保存；DecompressContext、SearchContext、CompactStatus 使用可选 ContextArchivePort
+执行有界检索/分页，cursor / nextCursor 为 additive 契约。原文分页展开到叶消息，摘要档位读取所选层，
+toFile 导出当前页并显式返回后续游标。权限/取消/事件仍由现有 Runtime 与工具执行链管理。
+状态所有者、分支与游标校验、验收见 [原生上下文合同](../compact/native-context.md)。
+
+回归约束（2026-11-02）：前缀与区间压缩均以摘要 bundle 提交为不可撤回的提交点；
+提交前检查取消，提交成功后先同步更新 Runtime 活跃历史和缓存，再发布 boundary/完成事件。
+后续事件写失败不重试已提交摘要、不回退活跃历史、不写虚假的 failed 压缩时间线，原错误
+继续向上暴露；已有 resume 恢复入口按 operationId 补齐完成状态。所有者与顺序见
+[Compact 提交语义](../compact/README.md#提交取消与后续事件失败2026-11-02-回归修复)。
+`SearchContext` 匹配持久化工具输出/错误的完整文本，长度限制只约束返回 snippet，不能
+在匹配前裁剪正文。schema、工具权限、结果预算与桌面/手机事件协议均保持现有合同。
+回归通过真实 handler 验证长输出尾部、长错误尾部、folded/role/scope 过滤和 snippet 上限。
+
+`CompactNow` 输入新增可选 `ranges: [{ startMessageId, endMessageId }]`（1–16 段，strict）；
+默认不传时仍是原「折叠最旧前缀」行为。端到端链路：
+
+```text
+CompactNowInputSchema.ranges
+  -> handler（原样转发，不再拒绝）
+  -> CompactControlPort.requestCompact({ instructions?, reason?, ranges? })
+  -> pendingCompactRequest（单槽，与默认折叠共用）
+  -> turn-loop 消费并透传 options.ranges
+  -> compactActiveConversation(options.ranges?)
+  -> options.ranges.length > 0 -> compactActiveConversationWithRanges
+       planCompactRanges（校验/外扩/合并）-> 每段一次摘要请求（并发 2，共享 abortSignal）
+       -> buildPostCompactRuntimeEntriesForRanges（live 原位替换）
+       -> persistCompactSummaries（N 条 record 一次 commitMessageBundle）
+       -> N 个 CompactBoundary 事件 + 1 个 CompactStarted/Completed
+```
+
+- 契约：schema 与 `CompactRangeInput` 在 `@zcode/contracts`；handler 不再返回
+  `ranges_not_supported`；port、pending、turn-loop、执行 options 全链路携带 ranges。
+- 执行：`planCompactRanges` 负责 messageId→runtime entry（`entry.messageId`）、外扩到
+  assistant round 边界、原始区间重叠合并、外扩吞掉用户显式保留 gap 时整单拒绝并回报实际
+  生效区间、排除已折叠 summary/boundary/assistant error、token>0、前缀不可折。全量预校验
+  通过后才发摘要请求；任一段失败不落盘、不替换活跃链。
+- 持久化：每段一条 compaction part + 一条 summary 消息，共享 operationId；per-range 声明
+  `part.metadata.compactRange`（宽松字段）与 `compactFormat:"ranges-v1"`，一次
+  `commitMessageBundle` 原子提交；操作级提醒只追加一次。
+- 冷恢复：有序重写按 boundary 物理顺序重放 range/legacy 记录，失败抛 SessionCorrupted，
+  保留 relink 原因，不再警告后整体回退到未裁切历史。
+- 去重键：`transcript-hydration` 对同一 operationId 下 ≥2 个边界身份的 range part 用
+  `operationId + boundary 身份` 复合键；`cold-event-merge` 始终保留 operation 级键作
+  fallback，并为 range 操作补逐段键；legacy 单 part 键与选择规则逐字节不变。
+- P3 跟随改动（读侧/生命周期一起收口）：
+  - 读侧由 `adapters/src/native-context` 的 archive 查询统一处理 `compactRange` 端点、
+    hierarchy 成员与 folded 标记；三个读取工具仅委托 ContextArchivePort。
+  - fork：`runtime/helpers/steering.ts` 重映射 `metadata.compactRange` 的 start/end/summary id；
+    `sqlite-session-store.assertForkBundleChildLocal` 对这三个 id 做 child-local 校验
+    （未映射或越界直接拒绝 fork，避免子会话冷恢复静默退回未裁切历史）。
+  - rewind：`evaluateRewindTarget` 的 coveredByCompact 改为区间判定，gap / 未选前缀不再被当作
+    已压缩；最新记录是 legacy 时保持旧规则。
+  - PreCompact hook：ranges 路径接入；`additionalContext` 合并进每段 prompt，block 整单 skipped；
+    宿主 `compactionSummary` 仅单区间可用，多区间拒绝（`pre_compact_summary_requires_single_range`）。
+- 已知边界：每段模型调用的 `ModelApiCustomAttributes` 无区间下标，用
+  `modelCall.logicalCallId = "<operationId>:range_N"` 区分；文件补回/plan 引用/PostCompact hook
+  与 legacy 对齐（补回范围取最后一个区间之后的保留段）；`lastCompact` 仍只表示最后一个折叠点。
+验证覆盖：契约 schema 正反例、handler 转发（不再拒绝）、plan 校验（缺失/外扩/合并/吞 gap/
+prefix/已折叠）、持久化单事务与 N 记录、legacy 冷恢复逐字节等价、range 冷恢复顺序、
+live/cold 去重键、读侧三工具多 range、fork remap/sqlite 负向、rewind 区间判定、
+ranges PreCompact（additionalContext/block/多区间宿主摘要拒绝）、live 链与 hydrate 逐条等价。
 
 ## 官方命令环境包装保留 Bash 后台能力（2026-10-28）
 
@@ -2089,3 +2187,13 @@ node_repl browser-client → protocol broker → 已有 browserExecute 反向协
 Browser control scope 的 admission 失败可由下一次业务请求用原 ID 重试；未知结果保留释放责任，
 只清除失败 flight。关闭优先于新 admission，不自动重放业务命令。Host ambient 无实例 ID 的
 只读 list 汇总同一会话路由的受控页面；模型 execute、取消、释放仍严格隔离实例。
+
+## 原生上下文工具界面（2026-11-03）
+
+四工具按名称使用共享工具卡，沿用展开状态、键盘交互、主题和远端快照提示。CompactNow 的 accepted 仅为排队回执，最终状态由既有压缩时间线发布；卡片展示原因、保留要求与区间摘要预览。状态工具把节点层级、上下文 token 估算与摘要调用用量分开；搜索显示片段与标识；解压显示有限预览、分页和文件信息。错误显式呈现，空结果不是错误，原始详情可按需检查。历史纯文本结果保留可读回退，不从文本猜测结构。
+
+执行器在现有 result.display 和持久 metadata 写入 `native_context` 有界展示投影；工具输出、模型文本和事件顺序不变。投影保留分页游标、文件指针、节点身份和用量，限制列表、子节点及文本预览，并标明展示截断。Desktop 实时和手机 replayable 均使用同一投影；历史结果仅有文本时直接展示原文。
+
+CompactStatus 展示归档返回的整页节点和每节点用量，最多 200 条，与 `maxRanges` 上限一致；不能将页面截到 40 条后继续使用已经越过整页的归档游标。归档仍以 26,000 字节控制节点页（单条超限时保留第一条），投影中每个节点最多显示 8 个子节点并标记截断，不新增分页所有者。
+
+验收场景：桌面和窄屏、深浅主题及中英文下，展开四工具；检查排队与完成不混淆、层级和调用用量分离、空页/错误/截断/cursor、详情键盘展开与远端快照加载。

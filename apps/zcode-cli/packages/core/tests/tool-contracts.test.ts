@@ -47,6 +47,12 @@ const DIRECT_BRANCH_EXPECTED_PROVIDER_TOOL_ORDER = [
   "Write",
   "DeferredToolCall",
   "ReadSessionContext",
+  // 折叠记忆族：检索/解压/状态/主动折叠。能力上属于 ReadSessionContext 的近亲
+  // （同样读持久化历史），但直读未过滤的 transcript，按注册序紧跟其后。
+  "SearchContext",
+  "DecompressContext",
+  "CompactStatus",
+  "CompactNow",
   // "ReplyToChannel",
   "CreateWorkflow",
   // 修订入口紧随 CreateWorkflow 注册（docs/dynamic-workflow/launch.md「The `AmendWorkflow` tool」）。

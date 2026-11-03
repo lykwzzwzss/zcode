@@ -133,6 +133,15 @@ export function shouldAutoCompact(input: {
     };
   }
 
+  // 切换模型或减少历史后可能已无需压缩，不应让旧熔断挡住安全的普通请求。
+  if (tokenCount < threshold) {
+    return {
+      ...common,
+      shouldCompact: false,
+      reason: "below_threshold",
+    };
+  }
+
   const maxFailures =
     positiveInt(config.maxConsecutiveFailures) ?? MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES;
   if ((input.consecutiveFailures ?? 0) >= maxFailures) {
@@ -140,14 +149,6 @@ export function shouldAutoCompact(input: {
       ...common,
       shouldCompact: false,
       reason: "circuit_breaker",
-    };
-  }
-
-  if (tokenCount < threshold) {
-    return {
-      ...common,
-      shouldCompact: false,
-      reason: "below_threshold",
     };
   }
 

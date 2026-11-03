@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyLintDiagnostics, parseLintCommand } from "../cli-lint-admission.mjs";
+import {
+  classifyLintDiagnostics,
+  parseLintCommand,
+  packageManagerCommand,
+} from "../cli-lint-admission.mjs";
+
+test("CLI lint 同时支持独立 pnpm.exe 与 Node 脚本入口", () => {
+  assert.deepEqual(packageManagerCommand("C:/tools/pnpm.exe", "node", ["exec", "oxlint"]), {
+    file: "C:/tools/pnpm.exe",
+    args: ["exec", "oxlint"],
+  });
+  assert.deepEqual(packageManagerCommand("/tools/pnpm.cjs", "node", ["exec", "oxlint"]), {
+    file: "node",
+    args: ["/tools/pnpm.cjs", "exec", "oxlint"],
+  });
+});
 
 test("只接纳原样上游的行数诊断，其他错误与修改过的文件仍阻断", () => {
   const diagnostics = [

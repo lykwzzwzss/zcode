@@ -1,6 +1,11 @@
 import { join } from "node:path";
 
 import {
+  PLUGIN_SYSTEM_PROMPTS_TOTAL_MAX_BYTES,
+  PLUGIN_SYSTEM_PROMPT_MAX_SECTIONS,
+  preparePluginSystemPrompt,
+} from "@zcode/contracts";
+import {
   traceContextToLogContext,
   createContextBuilder,
   createSubagentContextBuilder,
@@ -8,6 +13,7 @@ import {
 import type {
   Model,
   ModelToolCall,
+  PluginSystemPromptSection,
   SkillLoadOutcome,
   TraceContext,
   ContextSourceSnapshot,
@@ -172,7 +178,50 @@ export function createContextBuilderFromSnapshot(
     guidanceToolNames: this.getTools(options.model).map((tool) => tool.name),
   };
 
-  return createContextBuilder(contextConfig).setToolRegistry(this.registry);
+  const builder = createContextBuilder(contextConfig).setToolRegistry(this.registry);
+  // workflow actor 是临时执行体，宿主级插件提示不进去（与子代理同一规则）。
+  // 显式 customSystemPrompt 表示"用户要整段替换 stable system body"，此时也不追加
+  // 插件段——否则插件会排在用户自定义提示之后，让用户以为的最终权威失效。
+  // 全空白正文在 ContextBuilder 中视为未设置；这里必须同口径，否则默认身份正常生成，
+  // 插件段却被空格字符串意外关掉。
+  if (!this.config.workflowActor && !this.config.systemPrompt?.trim()) {
+    applyPluginSystemPrompts(builder, this.config.pluginSystemPrompts);
+  }
+  return builder;
+}
+
+/**
+ * 插件贡献的 system 段以 `append` 语义进入 system 区：
+ * - 不改写 `customSystemPrompt`（那是"整段替换 + 跳过动态段"的另一条路径）；
+ * - 不参与子代理与 workflow actor 的 builder（子代理走 `createSubagentContextBuilder`
+ *   早返回；workflow actor 在这里跳过），避免宿主级行为提示漏进临时执行体；
+ * - `cacheHint: "stable"` 让它在会话内保持前缀稳定，不破坏 prompt cache；
+ * - 边界标签只标明第三方来源，不能当作独立的权限或指令隔离机制；插件启用策略仍由宿主控制。
+ * 段顺序由 adapters 侧按 `order` 排好（`sortSystemPrompts`），这里保持原序；
+ * 与 adapters 共用准备函数，按完整包装后的字节和条目数记账，避免元数据放大请求体。
+ */
+export function applyPluginSystemPrompts(
+  builder: ContextBuilder,
+  sections: readonly PluginSystemPromptSection[] | undefined,
+): void {
+  if (!sections || sections.length === 0) return;
+  let remaining = PLUGIN_SYSTEM_PROMPTS_TOTAL_MAX_BYTES;
+  let count = 0;
+  for (const section of sections) {
+    const prepared = preparePluginSystemPrompt(section);
+    if (!prepared.ok) continue;
+    if (prepared.bytes > remaining || count >= PLUGIN_SYSTEM_PROMPT_MAX_SECTIONS) break;
+    remaining -= prepared.bytes;
+    count++;
+    builder.addSection({
+      name: section.name,
+      source: "plugin_system_prompt",
+      injectionTarget: "system",
+      cacheHint: "stable",
+      content: prepared.content,
+      preview: prepared.body.slice(0, 100),
+    });
+  }
 }
 
 export async function loadProjectMemoryRoot(
@@ -332,7 +381,8 @@ export function initializeMessageHistoryFromContext(
       confidence: "medium",
       tokenizer: "zcode.estimateTokens.v1",
       preview: s.preview,
-      content: s.content,
+      // 插件正文是第三方内容，整段落日志会随 debug 日志外泄；只留 preview 与体积。
+      content: s.source === "plugin_system_prompt" ? undefined : s.content,
     })),
   });
 }

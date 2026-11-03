@@ -14,7 +14,10 @@ import { EvalWorkflowSnippetToolCallBlock } from "@/ToolCallBlocks/renderers/eva
 import { ExploreToolCallBlock } from "@/ToolCallBlocks/renderers/explore.js";
 import { ExecuteToolCallBlock } from "@/ToolCallBlocks/renderers/execute.js";
 import { ExecuteGroupToolCallBlock } from "@/ToolCallBlocks/renderers/execute-group.js";
-import { FallbackToolCallBlock } from "@/ToolCallBlocks/renderers/fallback.js";
+import {
+  FallbackToolCallBlock,
+  NativeContextToolCallBlock,
+} from "@/ToolCallBlocks/renderers/fallback.js";
 import { GetWorkflowRunToolCallBlock } from "@/ToolCallBlocks/renderers/get-workflow-run.js";
 import { ListModelsToolCallBlock } from "@/ToolCallBlocks/renderers/list-models.js";
 import { ListSavedWorkflowsToolCallBlock } from "@/ToolCallBlocks/renderers/list-saved-workflows.js";
@@ -74,6 +77,9 @@ export function resolveToolCallRenderer(context: ToolCallBlockRenderContext) {
   // 工具目录查询只复用搜索卡片；不改 search family，避免被聚合为 Explore 内容搜索。
   const toolCall = context.toolCallNode.toolCall;
   const toolName = toolCall.toolName ?? toolCall.kind;
+  if (["CompactNow", "CompactStatus", "SearchContext", "DecompressContext"].includes(toolName)) {
+    return NativeContextToolCallBlock;
+  }
   // 参数生成和中途停止尚未经过执行归一化，必须让 Local 名称也复用同一卡片与文案。
   if (toolName === "ToolSearch" || toolName === "LocalToolSearch") {
     return ToolSearchToolCallBlock;

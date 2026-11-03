@@ -119,31 +119,40 @@ export async function runModelBackedTurnStep(
     stepId: assistantMessageId,
     stepIndex: state.modelStepCount,
   });
-  return stepTelemetry.run(async () => {
-    try {
-      const result = await runModelBackedTurnStepImpl.call(
-        this,
-        state,
-        options,
-        assistantMessageId,
-      );
-      stepTelemetry.finishCompleted(
-        result === "output_continuation"
-          ? "model_completed"
-          : result === "continue"
-            ? "tool_requested"
-            : "turn_completed",
-      );
-      return result;
-    } catch (error) {
-      if (isTurnCancellationError(error, state.turnAbortSignal)) {
-        stepTelemetry.finishCancelled("abort_signal");
-      } else {
-        stepTelemetry.finishFailed("unhandled", "unknown", error);
+  // 本步骤创建的所有 assistant/tool entry 都落在这条持久化 assistant 消息下。
+  // 提交点分散在流式工具协调器、工具结算和 turn 收尾里，无法逐点拿到 id；
+  // 在这里开启「归属窗口」，由 MessageHistory.addEntries 统一补 messageId。
+  // 必须在 finally 清空：步骤外的提醒/用户输入有自己的持久化消息 id。
+  this.messageHistory.setActiveAssistantMessageId(assistantMessageId);
+  try {
+    return await stepTelemetry.run(async () => {
+      try {
+        const result = await runModelBackedTurnStepImpl.call(
+          this,
+          state,
+          options,
+          assistantMessageId,
+        );
+        stepTelemetry.finishCompleted(
+          result === "output_continuation"
+            ? "model_completed"
+            : result === "continue"
+              ? "tool_requested"
+              : "turn_completed",
+        );
+        return result;
+      } catch (error) {
+        if (isTurnCancellationError(error, state.turnAbortSignal)) {
+          stepTelemetry.finishCancelled("abort_signal");
+        } else {
+          stepTelemetry.finishFailed("unhandled", "unknown", error);
+        }
+        throw error;
       }
-      throw error;
-    }
-  });
+    });
+  } finally {
+    this.messageHistory.setActiveAssistantMessageId(undefined);
+  }
 }
 
 async function runModelBackedTurnStepImpl(

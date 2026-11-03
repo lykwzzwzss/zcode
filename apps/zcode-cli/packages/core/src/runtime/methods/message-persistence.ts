@@ -256,7 +256,7 @@ export async function persistSyntheticUserNoticeForSession(
     },
     metadata: buildSyntheticUserNoticePartMetadata(options.source, visibility, options.metadata),
   }));
-  // 修复原因：冷恢复的 getLatestActiveSessionMessageId 跳过隐藏提醒（agent listing 等公告），
+  // 修复原因：冷恢复的 getLatestConversationMessageId 跳过隐藏提醒（agent listing 等公告），
   // 这里却总移动指针，live 与冷恢复的 compaction 覆盖边界、timeline 锚点不一致。
   // 用同一个判定，并传入将要写入的同一条记录（含 part），与冷恢复读到的完全相同。
   if (options.sessionId === this.sessionId && !isHiddenReminderMessage({ info, parts })) {

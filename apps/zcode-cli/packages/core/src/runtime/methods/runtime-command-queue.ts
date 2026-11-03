@@ -3,7 +3,12 @@ import {
   telemetryInputOrigin,
   TELEMETRY_INPUT_ORIGIN_ATTRIBUTE,
 } from "./input-intent-persistence.js";
-import { traceContextToLogContext } from "../deps.js";
+import {
+  createChildTraceContext,
+  createTurnId,
+  SessionEventType,
+  traceContextToLogContext,
+} from "../deps.js";
 import { refreshOffPeakWork } from "../off-peak/runtime.js";
 import type { RuntimeCommand, TaskNotificationRuntimeCommand } from "../command-queue.js";
 import { uuidv7 } from "@zcode/shared";
@@ -19,6 +24,12 @@ import { executeTargetContinuationCommand } from "./target.js";
 import { runActiveTargetContinuationLoop } from "./target-continuation-loop.js";
 import { isStaleBranchRuntimeCommand } from "./runtime-command-generation.js";
 import { noteWorkflowReminderCommandStarted } from "./dynamic-workflow-blocked-reminder.js";
+import { recoverCommittedCompactApply } from "./compact-active-helpers.js";
+import {
+  appendTurnOutcomeEvent,
+  createTurnFailureError,
+  wasTurnFailureReported,
+} from "../helpers/turn-errors.js";
 import type {
   AcquireForegroundPromotionLeaseResult,
   ActiveForegroundExecutionState,
@@ -62,6 +73,20 @@ export async function drainRuntimeCommandQueue(this: AgentRuntimeInternal): Prom
     while ((commands = dequeueNextRunnableBatch.call(this)).length > 0) {
       const firstCommand = commands[0];
       if (!firstCommand) continue;
+      if (
+        firstCommand.mode === "task-notification" ||
+        firstCommand.mode === "subagent-message" ||
+        firstCommand.mode === "control-only-turn"
+      ) {
+        try {
+          recoverCommittedCompactApply(this);
+        } catch (error) {
+          // 命令尚未写入历史：放回队首并停止 drain，避免丢消息或失败时无限重试。
+          this.runtimeCommandQueue.restoreFront(commands);
+          await reportBackgroundCommandFailure.call(this, firstCommand, error);
+          return;
+        }
+      }
       noteWorkflowReminderCommandStarted(this, firstCommand);
       if (firstCommand.mode === "task-notification") {
         const notificationCommands = commands.filter(
@@ -199,21 +224,12 @@ async function runPostCommandActiveTargetLoop(
     });
   }
   if (command.mode === "task-notification") {
-    try {
-      return await runActiveTargetContinuationLoop.call(this, {
-        abortSignal,
-        traceContext: command.traceContext,
-        trigger: "task-notification",
-        verifyBeforeFirstContinue: true,
-      });
-    } catch (error) {
-      this.logger?.warn("Post-command goal continuation failed", {
-        ...traceContextToLogContext(command.traceContext),
-        errorMessage: error instanceof Error ? error.message : String(error),
-        event: "target.continuation.after_command_failed",
-        module: "core.runtime",
-      });
-    }
+    return await runActiveTargetContinuationLoop.call(this, {
+      abortSignal,
+      traceContext: command.traceContext,
+      trigger: "task-notification",
+      verifyBeforeFirstContinue: true,
+    });
   }
   return null;
 }
@@ -337,13 +353,8 @@ async function runRuntimeCommand(
       command.reject(error);
       return;
     }
-    this.logger?.warn("Runtime command failed", {
-      ...traceContextToLogContext(command.traceContext),
-      commandMode: command.mode,
-      errorMessage: error instanceof Error ? error.message : String(error),
-      event: "runtime_command.failed",
-      module: "core.runtime",
-    });
+    if (!wasTurnFailureReported(error))
+      await reportBackgroundCommandFailure.call(this, command, error);
   } finally {
     finishForegroundExecution.call(this, foregroundExecution);
   }
@@ -422,18 +433,43 @@ async function runTaskNotificationBatch(
       module: "core.runtime",
     });
   } catch (error) {
-    this.logger?.warn("Background task notification batch failed", {
-      ...traceContextToLogContext(firstCommand.traceContext),
-      batchSize: eligibleCommands.length,
-      commandId: firstCommand.id,
-      commandIds,
-      errorMessage: error instanceof Error ? error.message : String(error),
-      event: "background_task.notification.batch_failed",
-      module: "core.runtime",
-    });
+    if (!wasTurnFailureReported(error))
+      await reportBackgroundCommandFailure.call(this, firstCommand, error);
   } finally {
     finishForegroundExecution.call(this, foregroundExecution);
   }
+}
+
+async function reportBackgroundCommandFailure(
+  this: AgentRuntimeInternal,
+  command: RuntimeCommand,
+  error: unknown,
+): Promise<void> {
+  // 生产消息前失败没有普通 turn 的错误收口；复用相同事件投影，确保客户端能看到原因。
+  const traceContext = createChildTraceContext(command.traceContext, { turnId: createTurnId() });
+  // V4 需要开始事件来创建错误行；model-only 不会伪造用户消息。
+  await this.appendEvent(
+    this.createEvent(
+      SessionEventType.TurnStarted,
+      {
+        turnNumber: this.turnNumber,
+        input: "",
+        inputVisibility: "model-only",
+      },
+      traceContext,
+    ),
+    traceContext,
+  );
+  await appendTurnOutcomeEvent(this, {
+    coreError: createTurnFailureError(error, undefined, "Background command failed"),
+    events: [],
+    durationMs: 0,
+    turnPhase: "queued",
+    traceContext,
+    fallbackMessage: "Background command failed",
+    logEvent: "runtime_command.failed",
+    logLabel: "Background command",
+  });
 }
 
 function beginForegroundExecution(

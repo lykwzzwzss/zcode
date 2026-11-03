@@ -17,6 +17,7 @@ import type {
   ModelRequestDependencies,
   ModelSelection,
   PluginReferenceCatalog,
+  PluginSystemPromptSection,
   ResolvedUserInstructions,
   StableForkGoalBoundaryMetadata,
   StableForkTargetMetadata,
@@ -210,6 +211,15 @@ export interface AgentRuntimeConfig {
     modelSelection?: ModelSelection;
     timeoutMs?: number;
   };
+  /**
+   * 折叠摘要可选专用模型。
+   *
+   * 缺省时完全沿用现有解析（`options.model` → session 选择），行为与没有该字段时一致；
+   * 配置后在 compact 时优先用它，并受 ModelCatalogPort 的可用性校验与 ModelFactory 的
+   * Selection 校验双重保护：模型不存在/被禁用/档位不支持时退回默认模型，折叠不失败。
+   * 摘要请求本身仍走 no-tools prompt 与 `MAX_OUTPUT_TOKENS_FOR_SUMMARY` 上限。
+   */
+  compactSummaryModel?: ModelSelection;
   parentSessionId?: SessionId;
   taskType?: SessionTaskType;
   /**
@@ -230,6 +240,13 @@ export interface AgentRuntimeConfig {
 
   // Context Builder config
   systemPrompt?: string;
+  /**
+   * 插件贡献的 system 段（adapters 解析、bootstrap 透传）。每段经 context builder 的
+   * `addSection` 以 `injectionTarget: "system"` 追加到 system 段末尾，并用
+   * `<plugin_system_prompt>` 边界标签标明第三方来源；改写不了 identity。
+   * 显式设置 `systemPrompt` 时整段跳过（用户要的是整段替换），子代理与 workflow actor 也不注入。
+   */
+  pluginSystemPrompts?: readonly PluginSystemPromptSection[];
   /**
    * 动态工作流子代理的身份输入：在场即让
    * context builder 走「基座 + 工作流子代理契约 + persona 叠加」路径，而不是把 persona 当

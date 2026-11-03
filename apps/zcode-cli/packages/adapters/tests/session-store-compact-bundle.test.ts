@@ -203,4 +203,78 @@ describe("sqlite fork bundle compact leading ids", () => {
       await expect(store.getSession(childSessionId)).resolves.not.toBeNull();
     },
   );
+
+  it("rejects ranges-v1 endpoints outside the child transcript", async () => {
+    const { childSessionId, commit, store } = await commitForkWithSummary("fork-range", {
+      compactFormat: "ranges-v1",
+      compactRange: {
+        endMessageId: createMessageId("parent-range-end"),
+        rangeId: "range_1",
+        startMessageId: createMessageId("parent-range-start"),
+      },
+    });
+
+    await expect(commit).rejects.toThrow(/compact range startMessageId/);
+    await expect(store.getSession(childSessionId)).resolves.toBeNull();
+  });
+
+  it("rejects recursive summary members outside the child transcript", async () => {
+    const { childSessionId, commit, store } = await commitForkWithSummary("fork-hierarchy-parent", {
+      hierarchy: {
+        memberMessageIds: [createMessageId("parent-only")],
+        childBoundaryIds: [],
+        level: 1,
+        originalMessageCount: 1,
+      },
+    });
+    await expect(commit).rejects.toThrow(/hierarchy memberMessageId/);
+    await expect(store.getSession(childSessionId)).resolves.toBeNull();
+  });
+
+  it("accepts ranges-v1 records whose endpoints are child-local", async () => {
+    const { store, sessionId: parentSessionId, tempRoot } = await openStore("fork-range-ok");
+    const childSessionId = createSessionId("fork-range-ok-child");
+    const start = userMessage(childSessionId, "range-start");
+    const end = userMessage(childSessionId, "range-end");
+    const summary = summaryMessage(childSessionId, []);
+    const compaction = summary.parts.find((part) => part.type === "compaction")!;
+    Object.assign(compaction, {
+      metadata: {
+        compactFormat: "ranges-v1",
+        compactRange: {
+          endMessageId: end.info.id,
+          rangeId: "range_1",
+          startMessageId: start.info.id,
+          summaryMessageId: summary.info.id,
+        },
+      },
+    });
+
+    await store.commitForkBundle!({
+      child: {
+        id: childSessionId,
+        parentID: parentSessionId,
+        projectID: createProjectId("fork-range-ok-project"),
+        slug: "fork-range-ok-child",
+        directory: tempRoot,
+        title: "child",
+        version: "0.1.0",
+      },
+      messages: [start, end, summary],
+      entries: [],
+      commandFact: {
+        parentSessionId: String(parentSessionId),
+        sourceCommandId: "cmd-fork-range-ok",
+        ack: {
+          commandId: "cmd-fork-range-ok",
+          status: "accepted",
+          revisionAtDecision: 1,
+          result: { type: "forkAssistant", sessionId: childSessionId },
+        },
+        metadata: {},
+      },
+    });
+
+    await expect(store.getSession(childSessionId)).resolves.not.toBeNull();
+  });
 });

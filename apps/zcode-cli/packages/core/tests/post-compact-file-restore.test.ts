@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ReadTextOutput } from "@zcode/contracts";
 import type { RuntimeMessageEntry } from "../src/agent/message-history.js";
@@ -10,9 +11,35 @@ import { READ_FILE_UNCHANGED_STUB } from "../src/tool/handlers/read-text.js";
 import { createReadFileStatePathKey } from "../src/tool/read-file-state.js";
 import type { ReadFileStateEntry, ReadFileStateMap } from "../src/tool/types.js";
 
-const root = "/tmp/zcode-post-compact-file-restore";
+// 虚拟工作区也使用本机绝对路径，避免 Windows resolve 补盘符后与 POSIX 字符串夹具错配。
+const root = resolve("/tmp/zcode-post-compact-file-restore");
 
 describe("post-compact file restore", () => {
+  it("bounds Flash restoration by recent files and total context, preserving the legacy budget for other models", async () => {
+    const readFileState = createState(
+      [3, 2, 1].map((mtimeMs) =>
+        entry(`${root}/src/flash-${mtimeMs}.ts`, { mtimeMs, sourceTool: "Read" }),
+      ),
+    );
+    const readFiles = vi.fn(perFile(async (filePath) => textRead(filePath, "x".repeat(10_000))));
+    const flash = await buildPostCompactFileRestore({
+      model: { modelId: "deepseek-v4.1-flash" },
+      readFileState,
+      readFiles,
+    });
+    expect(readFiles.mock.calls[0]?.[0]).toHaveLength(2);
+    expect(flash.readFileStateEntries).toHaveLength(1);
+    expect(flash.entries).toHaveLength(1);
+    readFiles.mockClear();
+    const legacy = await buildPostCompactFileRestore({
+      model: { modelId: "other-model" },
+      readFileState,
+      readFiles,
+    });
+    expect(readFiles.mock.calls[0]?.[0]).toHaveLength(3);
+    expect(legacy.readFileStateEntries).toHaveLength(3);
+  });
+
   it("re-reads Read, Write and Edit records and skips other writers and excluded paths", async () => {
     const files = {
       read: `${root}/src/read.ts`,
@@ -253,9 +280,9 @@ describe("post-compact file restore", () => {
     });
 
     const text = restore.entries.map(attachmentText).join("\n");
-    expect(text).toContain(first);
-    expect(text).not.toContain(dropped);
-    expect(text).toContain(small);
+    expect(text).toContain(JSON.stringify({ file_path: first }));
+    expect(text).not.toContain(JSON.stringify({ file_path: dropped }));
+    expect(text).toContain(JSON.stringify({ file_path: small }));
     expect(restore.readFileStateEntries.map((restored) => restored.path)).toEqual([first, small]);
   });
 

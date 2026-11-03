@@ -66,6 +66,10 @@ export function processHookOutput(
 
 export function mergeHookRunResult(target: HookRunResult, next: HookRunResult): void {
   target.additionalContexts.push(...next.additionalContexts);
+  if (next.compactionSummary !== undefined) {
+    // 多个 PreCompact 钩子都给摘要时以后者为准（配置顺序即优先级）。
+    target.compactionSummary = next.compactionSummary;
+  }
   if (next.blockRequested) {
     target.blockRequested = true;
     target.stopReason = next.stopReason ?? target.stopReason;
@@ -131,6 +135,15 @@ function applyHookSpecificOutput(result: HookRunResult, specific: HookSpecificOu
       if (specific.decision) {
         result.permissionRequestResult = specific.decision;
       }
+      break;
+    case HookEventName.PreCompact:
+      if (specific.compactionSummary && specific.compactionSummary.trim().length > 0) {
+        result.compactionSummary = specific.compactionSummary;
+      }
+      if (specific.additionalContext) result.additionalContexts.push(specific.additionalContext);
+      break;
+    case HookEventName.PostCompact:
+      if (specific.additionalContext) result.additionalContexts.push(specific.additionalContext);
       break;
     case HookEventName.PostToolUse:
     case HookEventName.PostToolUseFailure:

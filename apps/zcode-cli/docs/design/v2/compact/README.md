@@ -2,6 +2,12 @@
 
 ## 文档定位
 
+原生递归分层、持久化分页取回与长期验收的实现合同见 [native-context.md](./native-context.md)。
+
+路径回归验收使用平台原生绝对路径构造虚拟文件系统和 Read 状态；Windows 下不能把
+POSIX 字符串路径与经 `resolve` / `join` 的运行时路径混用。文件补回、权限、取消、计划引用
+和冷恢复断言必须实际执行，不能按操作系统跳过或放宽断言。
+
 本文记录 ZCode v2 compact 的候选设计。当前文档属于 `L1 Candidate Contract`：它明确 compact 的领域边界、状态变化、对外契约和风险，但不固定最终 TypeScript 接口、数据库表结构或事件字段全集。
 
 实施拆分见 [plan.md](./plan.md)。
@@ -59,6 +65,69 @@ Provider usage 是上下文占用的权威来源；没有 usage anchor 或计算
 `name + JSON.stringify(input ?? {})`。tool call id 不计入；tool result 已由消息 content 计入。
 无法 JSON 序列化的异常 tool input 仅在本地估算中按 `{}` 计算，避免预算辅助路径中断
 compact 或 preflight；该降级不改变 tool 执行和持久化合同。
+
+### 1.2.2 选择性区间压缩（ranges，P2 执行与持久化 + P3 读侧/生命周期已落）
+
+手动 compact 支持显式选择若干消息区间，只折叠这些区间，区间之外的消息保持原样：
+
+```json
+{ "ranges": [ { "startMessageId": "msg_a", "endMessageId": "msg_b" } ] }
+```
+
+- 输入：`CompactNowInputSchema.ranges`，1–16 段，`{startMessageId,endMessageId}` 均为持久化
+  消息 id（`message.info.id`），strict；不传时沿用原前缀折叠。`CompactNow` handler 原样转发，
+  port / pending / turn-loop / `compactActiveConversation` options 全链路透传。
+- 语义（已实现）：每段独立生成摘要并原位替换；端点自动外扩到 assistant round 边界
+  （tool_use/tool_result 不可拆），扩后重叠的段合并；外扩若吞掉用户显式保留的 gap 则整单拒绝
+  并在错误里回报实际生效区间；不生成 preservedSegment/leading 公告，但日期、计划模式、工具
+  目录等操作级提醒重发一次；整单原子——先做全量预校验（id 存在、在活跃分支、token>0、外扩后
+  不重叠、每段 prompt 不超限、旧摘要具有持久化身份和边界、不含 assistant error、不折上下文前缀），
+  全过才开始摘要，任一段失败则不落盘、不替换活跃链；每段一次模型调用（并发 2，共享
+  abortSignal；`modelCall.logicalCallId = "<operationId>:range_N"`）。
+- 执行落点：`compactActiveConversation` 检测到 ranges 后调用
+  `compactActiveConversationWithRanges`；`planCompactRanges` 负责选择与校验，
+  `buildPostCompactRuntimeEntriesForRanges` 负责 live 链原位替换；每段发一条
+  `ModelComplete`，`boundary.truePostCompactTokenCount` 在全部替换完成后回填；文件补回、
+  plan 文件引用、PostCompact hook 与 legacy 对齐（补回范围取最后一个区间之后的保留段）。
+- 持久化：每段一条 compaction part + 一条 summary 消息 + 一个 `CompactBoundary` 事件，共享
+  同一 operationId；per-range 覆盖声明放 `part.metadata.compactRange = { rangeId,
+  startMessageId, endMessageId, summaryMessageId }`（宽松字段，不改 strict boundary），并写
+  `compactFormat: "ranges-v1"`；`persistCompactSummaries` 把所有记录一次
+  `commitMessageBundle` 提交，操作级提醒只追加一次。
+- 冷恢复（P1 已实现）：`compact-session.ts` 的 `compactSessionMessages` 收集所有活跃 boundary，
+  按 boundary 消息的物理顺序（即写入顺序）逐条重放——range 记录先移除摘要消息的物理出现，
+  再把 `[startMessageId..endMessageId]` 连续段原位替换为摘要；legacy 记录仍按「保留声明 +
+  前缀裁剪」语义处理；完全不含 ranges 记录的历史 session 直接走旧函数，结果逐字节等价。
+  任一条定位失败（端点缺失、区间重叠/嵌套、声明摘要 id 与 boundary 消息不一致）抛出
+  SessionCorrupted，并保留结构化原因；不再警告后返回未裁切历史。resume/rewind 的消息锚点
+  从已恢复的活跃时间线读取，不再对该时间线重复重放压缩记录。
+- 读侧（P3 已实现）：`CompactedRange` 带上 `rangeId/startMessageId/endMessageId`；
+  `foldedWindowForRange` 对 ranges-v1 记录按显式端点定位（summary 追加在物理末尾，不能再按
+  「相邻 boundary 的 messageIndex」推导）；`collectFoldedMessageIndexes` 只把显式区间内的原文
+  标 folded，gap / 未选前缀 / 更早摘要仍算活跃；混合会话里若最新一条是 legacy，仍沿用旧前缀
+  判定。`SearchContext` / `DecompressContext` / `CompactStatus` 三个消费方自动跟随。
+- fork / rewind / sqlite（P3 已实现）：`runtime/helpers/steering.ts` fork 时重映射
+  `metadata.compactRange` 的三个 id；`sqlite-session-store` 的 `assertForkBundleChildLocal`
+  校验它们必须 child-local；`evaluateRewindTarget` 的 coveredByCompact 改为「target 落在某个
+  显式区间内」——gap / 未选前缀是活跃消息，不再被误判成已被压缩（最新记录是 legacy 时仍用旧规则）。
+- PreCompact hook（P3 已实现）：ranges 路径先跑 PreCompact，`additionalContext` 合并进每段
+  摘要请求；`block` 时整单 skipped、不落盘；钩子返回 `compactionSummary` 时仅单区间可直用，
+  多区间会拒绝并返回 `pre_compact_summary_requires_single_range`（一份宿主摘要无法拆成 N 段）。
+- 去重键（P2 修复）：`transcript-hydration` 对同一 operationId 下 ≥2 个边界身份的 range part
+  用 `operationId + boundary 身份` 复合键，operation 级 `CompactCompleted` 取最后一段的
+  boundary/summary/tailStart；`cold-event-merge` 始终保留 operation 级键作 fallback，并为
+  range 操作补逐段键；legacy 单 part 的键与选择规则逐字节不变。
+- 契约：`CompactRangeMetadata` 与 `CompactionPartMetadata.compactRange / compactFormat` 已加入
+  `@zcode/contracts`（宽松字段，旧版本按 JSON 读取时忽略）。
+- 投影：`lastCompact` 仍表示最后一个折叠点；`CompactStatus` 按 boundary 数组展示全部段，
+  将来再加 `compactRanges?: []` additive 字段。
+- 兼容：旧版本读取含 ranges 的会话时只会认最后一个 boundary，把之前的历史全部当作已折叠——
+  模型上下文会静默塌缩为「最后一段摘要 + 尾部」，但 SQLite 原文不丢，已接受并在发版说明标注。
+- 工具说明：`ranges` 的 schema describe 与 `CompactNow` 的 modelInstructions 已面向模型描述
+  选择性压缩用法（原 P0「未启用/会被拒绝」文案已移除）。
+- 当前状态：P0 契约、P1 冷恢复重写内核、P2 执行/持久化/去重键、P3 读侧显式 range /
+  fork remap + sqlite 校验 / rewind 判定 / PreCompact hook 均已落。剩余：e2e ranges 用例、
+  发版说明（旧版本静默塌缩的最低版本要求）；`lastCompact` 仍只表示最后一个折叠点（已拍板接受）。
 
 ### 1.3 执行流程
 
@@ -128,6 +197,12 @@ call ids 和 traceId。该事件只服务观测和 UI，不参与 full compact a
 
 Compact 必须进入 append-only session log。不能只改内存数组，否则 resume、continue、SDK 和后台任务会看到不同历史。
 
+自动和模型溢出触发的压缩：配置关闭、未达阈值、无可压缩内容及插件明确阻止属于正常跳过；
+执行过程中抛出的异常（包含摘要模型、hook 和存储错误）保留原始原因，终止当前轮并通过既有
+TurnError 暴露。未提交时不得替换活跃历史，也不得继续向模型发送本轮正常请求。连续失败达到
+熔断阈值且当前仍需要压缩时，停止自动重试并报告明确错误；手动或自动压缩成功后重置熔断。
+切换到更大上下文使当前用量低于阈值时，无需压缩的轮次可正常继续。
+
 持久化要求：
 
 - `CompactBoundary` 是 message chain 的逻辑断点。
@@ -137,6 +212,41 @@ Compact 必须进入 append-only session log。不能只改内存数组，否则
 - replay 时应优先构建 post-compact chain；只有 relink 元数据损坏时，才进入保守兜底。
 
 relink 失败时选择不 prune，避免因为边界元数据损坏导致历史不可恢复。采用这个保守原则时必须打结构化告警，并把异常归入同一个 `traceId`。
+
+#### 提交、取消与后续事件失败（2026-11-02 回归修复）
+
+前缀与 ranges 路径共用以下提交语义：Runtime 是活跃历史的唯一所有者，摘要 bundle
+是重放的权威记录。摘要、文件补回和提醒准备完成后，在提交前最后检查取消；取消时
+不写摘要、不替换历史。提交一旦成功，必须在下一次 await 之前同步更新 messageHistory、
+latestConversationMessageId、文件读取状态、memory recall 与 nudge 基线；提交期间到达的
+取消不能把已经落盘的状态退回旧历史。
+
+```mermaid
+sequenceDiagram
+    participant R as Runtime（活跃历史 owner）
+    participant S as SessionStore（重放记录）
+    participant E as EventStore / 客户端
+    R->>R: 摘要与提醒准备完成，检查取消
+    R->>S: 提交摘要 bundle
+    S-->>R: 提交成功
+    R->>R: 同步应用已提交历史与缓存状态
+    R->>E: CompactBoundary / Completed
+    Note over R,E: 后续写入失败仍保留已提交状态，错误向上暴露；下一个请求入口先重放提交
+```
+
+提交后的事件/完成时间线/PostCompact 故障不得重新摘要、不得将已提交操作改记为 failed 或
+interrupted；记录 `compact.post_commit.failed` 后向上暴露原错误。提交落盘后直到后续事件、
+完成时间线和 PostCompact 钩子全部完成，Runtime 一直保留这份提交的重放输入；同步应用本身
+或后续任一步失败时，自动压缩也必须向上暴露错误并终止当前轮，保留重放输入。普通轮、后台
+通知、子代理消息及 control-only 入口都必须在写入新的活跃历史前重放，否则重放会覆盖新消息。
+重放再次失败按 `InvalidStateTransition` fail-closed，不向模型发送旧历史；后台队列中尚未写入
+的消息保留待重试，失败通过回合错误事件向客户端暴露。`resumeFromStore` 与 rewind
+以存储/重建结果为唯一事实，会清空重放输入。未写完的 started/retrying 时间线由既有 resume
+恢复入口根据 operationId 对应的持久化 boundary 收敛为 completed。PostCompact 观察的是已提交
+的活跃历史，返回的 additionalContext 在替换之后追加。
+回归覆盖：前缀/ranges 的提交前取消、提交期间取消、bundle 写失败、boundary 事件失败、
+完成时间线写失败、完成事件失败、自动压缩提交后错误终止当前轮、跨轮重放、后台消息不丢失、
+持续失败 fail-closed，以及失败后继续执行/冷恢复一致性与禁止重复摘要。
 
 ### 1.8 清理和缓存失效
 

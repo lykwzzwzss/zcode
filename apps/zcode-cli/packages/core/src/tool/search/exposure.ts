@@ -50,6 +50,8 @@ interface ToolExposureInput {
   tools: readonly ModelToolContract[];
   registry?: Pick<ToolRegistry, "get">;
   entries: readonly RuntimeMessageEntry[];
+  /** 辅助请求可沿用完整活跃历史的发现事实，正文仍只投影 entries。 */
+  discoveryEntries?: readonly RuntimeMessageEntry[];
 }
 
 function resolveToolSearchCatalog(
@@ -99,7 +101,9 @@ function resolveToolSearchCatalog(
 }
 
 export function buildToolExposure(input: ToolExposureInput) {
-  const { discovered, preCompactDiscoveredTools } = collectToolSearchHistory(input.entries);
+  const { discovered, preCompactDiscoveredTools } = collectToolSearchHistory(
+    input.discoveryEntries ?? input.entries,
+  );
   const { catalog, deferred, enabled, mode, reason } = resolveToolSearchCatalog(
     input,
     preCompactDiscoveredTools,

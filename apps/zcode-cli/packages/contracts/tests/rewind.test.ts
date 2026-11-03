@@ -218,6 +218,77 @@ describe("rewind contracts", () => {
     });
   });
 
+  it("does not treat gaps between explicit ranges as covered by compact", () => {
+    const items = [
+      item("msg_prefix"),
+      item("msg_r1a"),
+      item("msg_r1b"),
+      item("msg_gap"),
+      item("msg_r2a"),
+      rangeBoundary("boundary_r1", "msg_r1a", "msg_r1b"),
+      rangeBoundary("boundary_r2", "msg_r2a", "msg_r2a"),
+    ];
+
+    const gap = evaluateRewindTarget({
+      items,
+      scope: RewindScope.Conversation,
+      targetMessageId: "msg_gap",
+    });
+    expect(gap).toMatchObject({
+      reason: "target_in_active_chain",
+      strategy: RewindStrategy.ActiveChain,
+      targetStatus: RewindTargetStatus.ActiveChain,
+    });
+
+    const insideRange = evaluateRewindTarget({
+      items,
+      scope: RewindScope.Conversation,
+      targetMessageId: "msg_r1b",
+    });
+    expect(insideRange).toMatchObject({
+      reason: "target_covered_by_compact_active_branch_rebuild",
+      strategy: RewindStrategy.ActiveChain,
+      targetStatus: RewindTargetStatus.CoveredByCompact,
+    });
+
+    // gap 仍是活跃消息：带 checkpoint 的 workspace 回退应走 ActiveChain，而不是 FileOnly。
+    const workspace = evaluateRewindTarget({
+      checkpointAvailable: true,
+      items,
+      scope: RewindScope.Workspace,
+      targetMessageId: "msg_gap",
+    });
+    expect(workspace).toMatchObject({
+      strategy: RewindStrategy.ActiveChain,
+      targetStatus: RewindTargetStatus.ActiveChain,
+    });
+  });
+
+  it("keeps the legacy rule when the latest fold is a legacy boundary", () => {
+    const result = evaluateRewindTarget({
+      items: [
+        item("msg_prefix"),
+        item("msg_r1a"),
+        rangeBoundary("boundary_r1", "msg_r1a", "msg_r1a"),
+        boundary(),
+      ],
+      scope: RewindScope.Conversation,
+      targetMessageId: "msg_prefix",
+    });
+
+    expect(result).toMatchObject({
+      strategy: RewindStrategy.ActiveChain,
+      targetStatus: RewindTargetStatus.CoveredByCompact,
+    });
+  });
+
+  function rangeBoundary(id: string, startMessageId: string, endMessageId: string): CompactContextItem {
+    return item(id, {
+      compactBoundary: boundaryPayload,
+      compactRange: { endMessageId, startMessageId },
+    });
+  }
+
   function boundary(): CompactContextItem {
     return item("boundary", { compactBoundary: boundaryPayload });
   }

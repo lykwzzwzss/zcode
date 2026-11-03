@@ -27,9 +27,10 @@ export async function createCompatibleHookStdin(input: HookInput): Promise<{
   await writeFile(transcriptPath, formatTranscript(input), "utf8");
   compatible.transcript_path = transcriptPath;
   compatible.transcriptPath = transcriptPath;
+  // entriesTranscript 已经落进 transcript 文件；再随 stdin 发一份等于把上兆字节塞进管道。
+  delete compatible.entriesTranscript;
 
   if ("toolName" in input) {
-
     // 这里只补无损 alias，继续保留 ZCode camelCase 字段作为内部主契约。
     compatible.tool_name = input.toolName;
     compatible.tool_input = input.toolInput;
@@ -44,7 +45,6 @@ export async function createCompatibleHookStdin(input: HookInput): Promise<{
       compatible.tool_response = input.toolResponse;
       break;
     case HookEventName.PostToolUseFailure:
-
       compatible.error_details = input.error;
       compatible.error = input.error.message;
       compatible.is_interrupt = input.isInterrupt;
@@ -56,6 +56,8 @@ export async function createCompatibleHookStdin(input: HookInput): Promise<{
     case HookEventName.SessionStart:
     case HookEventName.UserPromptSubmit:
     case HookEventName.PreToolUse:
+    case HookEventName.PreCompact:
+    case HookEventName.PostCompact:
       break;
   }
 
@@ -145,6 +147,10 @@ function formatTranscript(input: HookInput): string {
   }
   if (input.hookEventName === HookEventName.UserPromptSubmit) {
     return formatMessageLine("user", input.prompt);
+  }
+  if (input.hookEventName === HookEventName.PreCompact) {
+    // 待折叠历史：宿主发起折叠时钩子要读这段原文，空文件等于让它瞎写。
+    return input.entriesTranscript ? `${input.entriesTranscript}\n` : "";
   }
   return "";
 }

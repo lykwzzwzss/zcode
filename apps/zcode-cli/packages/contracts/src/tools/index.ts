@@ -27,6 +27,9 @@ export * from "./respond-to-coordinator.js";
 export * from "./task-output.js";
 export * from "./task-stop.js";
 export * from "./read-session-context.js";
+// 会话记忆四件套：名字常量被 core 的注册、allowlist 与 handler 读走。
+// 漏掉这行，四个工具会整组静默消失（consumers 拿不到 schema 与 *_TOOL_NAME）。
+export * from "./context-memory.js";
 export * from "./submit-result.js";
 export * from "./websearch.js";
 export * from "./workflow.js";

@@ -19,6 +19,7 @@ import type { ControlOnlyTurnRuntimeCommand } from "../command-queue.js";
 import { buildProjectionAnchor } from "./projection-anchor.js";
 import { maybeStartGoalSummaryTitleGeneration } from "./goal-summary-title.js";
 import { maybeStartSessionTitleGeneration } from "./session-title.js";
+import { recoverCommittedCompactApply } from "./compact-active-helpers.js";
 
 /**
  * controlOnly 用户轮的公共边界（`/goal` 外部 query 与中枢直接启动工作流共用）。
@@ -56,6 +57,8 @@ export async function emitControlOnlyUserTurn(
   // /goal 入口可能早于首次 turn 写入 runtime history；如果先 addUser，
   // 后续 lazy context init 会重建 messageHistory 并冲掉这条真实用户 query。
   await this.ensureContextInitialized(traceContext);
+  // control-only 不经过普通请求入口，也必须在写入真实用户消息前完成压缩重放。
+  recoverCommittedCompactApply(this);
   await this.ensureSessionPersisted(options.titleInput, traceContext);
   // 这类入口本身不走普通 submitPrompt，但它承载的是用户真实意图。这里同时写入
   // runtime history 和 session store，让模型上下文、桌面 continuous、手机 replayable snapshot
@@ -63,6 +66,9 @@ export async function emitControlOnlyUserTurn(
   this.messageHistory.addUser(
     buildUserContentFromTurn(options.historyText, []),
     realUserRuntimeMetadata(),
+    // P0：这条入口以前没带 messageId，冷恢复后无法把这些 user entry 映射回数据库消息，
+    // 选择性区间压缩按 message id 选段时会漏掉它们。messageId 在 :55 已由调用方给出。
+    messageId,
   );
   await options.persistMessage();
   // 不进入 executeTurn 的入口过去只有 transcript 落库，live ProductProjection 收不到

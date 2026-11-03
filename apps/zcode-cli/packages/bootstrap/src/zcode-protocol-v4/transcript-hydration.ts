@@ -396,6 +396,119 @@ function compactPayloadFromLegacyCompactionPart(
   };
 }
 
+type CompactionRecordPart = Extract<MessagePart, { type: "compaction" }>;
+
+/**
+ * 选择性区间压缩（ranges-v1）让一次 compact operation 产出 N 条 compaction part：
+ * 每段一条 part/summary/boundary，全部共享同一个 operationId。只按 operationId 去重
+ * 会把后 N−1 段并成一条——冷恢复既可能丢区间边界，也可能让 operation 级完成事件
+ * 配上错误的区间（live 契约要求 boundaryId/summaryMessageId/tailStartMessageId 取
+ * 最后一段）。
+ *
+ * 边界身份只从持久化事实取，不猜：
+ *  - timeline part 与旧 mirror compaction part 写顶层 boundaryId / summaryMessageId；
+ *  - durable compaction part 的边界只在 compactBoundary payload 里，顶层没有；
+ *  - ranges-v1 另有 metadata.compactRange.rangeId（仅排障用，足以区分区间）。
+ * 完全没有身份的历史记录返回 null，调用方回退旧 operation 键，保证 legacy 单 part
+ * 数据的去重结果逐字节不变。
+ */
+function compactionBoundaryIdentity(part: MessagePart): string | null {
+  if (part.type === "timeline") {
+    if (part.timelineType !== "context_compaction") return null;
+    return nonEmpty(part.boundaryId) ?? nonEmpty(part.summaryMessageId) ?? null;
+  }
+  if (part.type !== "compaction") return null;
+  return (
+    nonEmpty(part.boundaryId) ??
+    nonEmpty(part.compactBoundary?.boundaryId) ??
+    nonEmpty(part.summaryMessageId) ??
+    nonEmpty(part.compactBoundary?.summaryMessageIds[0]) ??
+    null
+  );
+}
+
+/**
+ * 旧去重键（operation 级）：timeline part 用 operationId，compaction part 用
+ * operationId ?? boundaryId ?? legacy-part-id。legacy 数据（无 ranges）一直用它。
+ */
+export function compactionOperationKey(part: MessagePart): string | null {
+  if (part.type === "timeline") {
+    if (part.timelineType !== "context_compaction") return null;
+    return String(part.operationId);
+  }
+  if (part.type !== "compaction") return null;
+  return String(part.operationId ?? part.boundaryId ?? `legacy-compact-${String(part.id)}`);
+}
+
+/**
+ * ranges-v1 复合去重键：operation 键 + 该 part 自己的 boundary/range 身份。
+ * 调用方只应在「同一 operationId 下出现 ≥2 个身份」时使用它，保证 legacy 数据
+ * 仍走旧 operation 键（老数据里 timeline part 与 durable part 的身份字段可能不一致）。
+ */
+export function compactRangeDedupeKey(operationKey: string, boundaryIdentity: string): string {
+  return `${operationKey}\u0000${boundaryIdentity}`;
+}
+
+/** 从 boundary 身份归集里筛出需要按区间区分去重的 operation（身份数 ≥2 = ranges-v1）。 */
+function rangeScopedOperationsOf(
+  identitiesByOperation: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlySet<string> {
+  const rangeScoped = new Set<string>();
+  for (const [operationKey, identities] of identitiesByOperation) {
+    // 只有一个（或没有）boundary 身份的 operation 是 legacy 单 part 折叠，保持旧键。
+    if (identities.size > 1) rangeScoped.add(operationKey);
+  }
+  return rangeScoped;
+}
+
+/** 扫描 transcript，找出 ranges-v1 多区间 compact operation（每段一条 part/boundary）。 */
+export function collectRangeScopedCompactOperations(
+  messages: readonly MessageWithParts[],
+): ReadonlySet<string> {
+  const identitiesByOperation = new Map<string, Set<string>>();
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const operationKey = compactionOperationKey(part);
+      const boundaryIdentity = compactionBoundaryIdentity(part);
+      if (operationKey === null || boundaryIdentity === null) continue;
+      const identities = identitiesByOperation.get(operationKey);
+      if (identities) {
+        identities.add(boundaryIdentity);
+      } else {
+        identitiesByOperation.set(operationKey, new Set([boundaryIdentity]));
+      }
+    }
+  }
+  return rangeScopedOperationsOf(identitiesByOperation);
+}
+
+/**
+ * compact 记录去重键。ranges-v1 多区间 operation 用 `operationKey\u0000identity`
+ * 区分同 operation 的不同区间；legacy（≤1 个身份）继续用旧 operation 键。
+ * identity 缺失时同样回退旧键，绝不把历史 part 拆成多条。
+ */
+export function compactPartDedupeKey(
+  part: MessagePart,
+  rangeScopedOperations: ReadonlySet<string>,
+): string | null {
+  const operationKey = compactionOperationKey(part);
+  if (operationKey === null) return null;
+  const boundaryIdentity = compactionBoundaryIdentity(part);
+  if (boundaryIdentity === null || !rangeScopedOperations.has(operationKey)) return operationKey;
+  return compactRangeDedupeKey(operationKey, boundaryIdentity);
+}
+
+/** 事件侧边界身份：live CompactCompleted 的 boundaryId/summaryMessageId 取最后一段。 */
+export function compactEventBoundaryIdentity(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  return nonEmpty(record.boundaryId) ?? nonEmpty(record.summaryMessageId);
+}
+
+function nonEmpty(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function parseJsonObject(input: string | undefined): Record<string, unknown> | null {
   if (!input) return null;
   try {
@@ -871,10 +984,26 @@ function synthesizeToolPart(
   return { resultType: "cancelled", toolCallCount: 1 };
 }
 
+/**
+ * 冷恢复的 durable compaction part 索引。
+ *
+ * ranges-v1 下同一 operation 有 N 条 part（共享 operationId、每段 boundary 不同），
+ * 因此不能只按 operationId 存一条：
+ *  - byKey：operationId + boundary 身份的逐段键，容纳全部 N 条区间记录；
+ *  - byOperation：旧 operationId 键，保留 legacy「首条优先、后续只有补上
+ *    tail_start_id 时才替换」的选择规则，供没有 boundary 身份的历史 part 回退。
+ */
+interface DurableCompactPartIndex {
+  readonly byKey: ReadonlyMap<string, CompactionRecordPart>;
+  readonly byOperation: ReadonlyMap<string, CompactionRecordPart>;
+  /** 需要按区间区分去重的 operation（ranges-v1：同一 operationId 下 ≥2 个边界身份）。 */
+  readonly rangeScopedOperations: ReadonlySet<string>;
+}
+
 function synthesizeCompactPart(
   part: MessagePart,
   emittedCompactOperations: Set<string>,
-  durableCompactPartsByOperation: ReadonlyMap<string, Extract<MessagePart, { type: "compaction" }>>,
+  durableCompactParts: DurableCompactPartIndex,
   push: PushEvent,
   turnId: string,
 ): boolean {
@@ -885,8 +1014,15 @@ function synthesizeCompactPart(
         ? compactPayloadFromLegacyCompactionPart(part)
         : null;
   if (!compact) return false;
-  const operationId = String(compact.payload.operationId);
-  const durablePart = durableCompactPartsByOperation.get(operationId);
+  // 去重键带上该 part 自己的 boundary/range 身份：ranges-v1 的 N 段 part 共享
+  // operationId，只按 operationId 查会命中别的区间（operation 级 completed 事件按
+  // live 契约应取最后一段）。legacy 数据没有身份或只有单边界时复合键等于旧
+  // operation 键，查找/去重行为逐字节不变。
+  const operationKey = compactionOperationKey(part) ?? String(compact.payload.operationId);
+  const dedupeKey =
+    compactPartDedupeKey(part, durableCompactParts.rangeScopedOperations) ?? operationKey;
+  const durablePart =
+    durableCompactParts.byKey.get(dedupeKey) ?? durableCompactParts.byOperation.get(operationKey);
   if (durablePart) {
     // 同 operation 的 timeline part 通常排在 durable compaction part 前面。
     // 旧“先到先得”会丢 tail_start_id；优先采用带 coverage boundary 的 durable payload。
@@ -901,10 +1037,47 @@ function synthesizeCompactPart(
       },
     };
   }
-  if (emittedCompactOperations.has(operationId)) return true;
-  emittedCompactOperations.add(operationId);
+  if (emittedCompactOperations.has(dedupeKey)) return true;
+  emittedCompactOperations.add(dedupeKey);
   push(compactEventType(compact.status), compact.payload, turnId);
   return true;
+}
+
+/**
+ * 收集冷恢复可用的 durable compaction part。
+ *
+ * ranges-v1（选择性区间压缩）下同一 operationId 有 N 条 part，每段 boundary 不同；
+ * 旧实现只按 operationId 存一条，冷恢复会丢掉后 N−1 段的区间身份。这里按
+ * `compactPartDedupeKey` 的逐段键保留全部区间记录，同时保留旧 operation 键索引
+ * （选择规则与旧实现一致）作为没有任何边界身份的历史数据的回退。
+ */
+function collectDurableCompactParts(
+  messages: readonly MessageWithParts[],
+): DurableCompactPartIndex {
+  const rangeScopedOperations = collectRangeScopedCompactOperations(messages);
+  const byKey = new Map<string, CompactionRecordPart>();
+  const byOperation = new Map<string, CompactionRecordPart>();
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== "compaction") continue;
+      if (!part.timelineStatus && !part.tail_start_id && !part.compactBoundary) continue;
+      const operationKey = compactionOperationKey(part);
+      if (operationKey === null) continue;
+      // legacy 回退索引：保持旧「首条优先，后续只有补上 tail_start_id 时才替换」。
+      const existingOperationPart = byOperation.get(operationKey);
+      if (!existingOperationPart || (!existingOperationPart.tail_start_id && part.tail_start_id)) {
+        byOperation.set(operationKey, part);
+      }
+      // ranges-v1 逐段索引：同 operationId 的不同 boundary 各占一个键，不再互相覆盖。
+      const dedupeKey = compactPartDedupeKey(part, rangeScopedOperations);
+      if (dedupeKey === null) continue;
+      const existingPart = byKey.get(dedupeKey);
+      if (!existingPart || (!existingPart.tail_start_id && part.tail_start_id)) {
+        byKey.set(dedupeKey, part);
+      }
+    }
+  }
+  return { byKey, byOperation, rangeScopedOperations };
 }
 
 // ── goal verification timeline part──
@@ -1237,7 +1410,7 @@ function synthesizeSubtaskPart(
 function synthesizeAssistantParts(
   message: MessageWithParts,
   emittedCompactOperations: Set<string>,
-  durableCompactPartsByOperation: ReadonlyMap<string, Extract<MessagePart, { type: "compaction" }>>,
+  durableCompactParts: DurableCompactPartIndex,
   emittedGoalVerifications: Set<string>,
   push: PushEvent,
   turnId: string,
@@ -1281,22 +1454,10 @@ function synthesizeAssistantParts(
         if (synthesizeGoalVerificationPart(part, emittedGoalVerifications, push, turnId)) {
           break;
         }
-        synthesizeCompactPart(
-          part,
-          emittedCompactOperations,
-          durableCompactPartsByOperation,
-          push,
-          turnId,
-        );
+        synthesizeCompactPart(part, emittedCompactOperations, durableCompactParts, push, turnId);
         break;
       case "compaction":
-        synthesizeCompactPart(
-          part,
-          emittedCompactOperations,
-          durableCompactPartsByOperation,
-          push,
-          turnId,
-        );
+        synthesizeCompactPart(part, emittedCompactOperations, durableCompactParts, push, turnId);
         break;
       case "subtask":
         synthesizeSubtaskPart(part, push, turnId);
@@ -1439,7 +1600,7 @@ function collectTurnOutput(options: {
   turnId: string;
   turnStartedAtMs: number;
   emittedCompactOperations: Set<string>;
-  durableCompactPartsByOperation: ReadonlyMap<string, Extract<MessagePart, { type: "compaction" }>>;
+  durableCompactParts: DurableCompactPartIndex;
   emittedGoalVerifications: Set<string>;
   goalVerificationsByAnchor: ReadonlyMap<string, GoalVerificationFact[]>;
   onModelChange: (selection: HydratedTimelineModel) => void;
@@ -1566,7 +1727,7 @@ function collectTurnOutput(options: {
     const synthesized = synthesizeAssistantParts(
       message,
       options.emittedCompactOperations,
-      options.durableCompactPartsByOperation,
+      options.durableCompactParts,
       options.emittedGoalVerifications,
       push,
       turnId,
@@ -1667,23 +1828,10 @@ export function synthesizeEventsFromMessages(
   let turnNumber = 0;
   let index = 0;
   const emittedCompactOperations = new Set<string>();
-  const durableCompactPartsByOperation = new Map<
-    string,
-    Extract<MessagePart, { type: "compaction" }>
-  >();
-  for (const message of messages) {
-    for (const part of message.parts) {
-      if (part.type !== "compaction") continue;
-      if (!part.timelineStatus && !part.tail_start_id && !part.compactBoundary) continue;
-      const operationId = String(
-        part.operationId ?? part.boundaryId ?? `legacy-compact-${String(part.id)}`,
-      );
-      const existing = durableCompactPartsByOperation.get(operationId);
-      if (!existing || (!existing.tail_start_id && part.tail_start_id)) {
-        durableCompactPartsByOperation.set(operationId, part);
-      }
-    }
-  }
+  // durable compaction part 索引：ranges-v1 下同一 operationId 有 N 条逐段 part，
+  // 索引必须按 boundary 身份逐段保留，不能只按 operationId 留一条（见
+  // collectDurableCompactParts 注释）。
+  const durableCompactParts = collectDurableCompactParts(messages);
   const emittedGoalVerifications = new Set<string>();
   let lastTurnId: string | undefined;
 
@@ -1857,7 +2005,7 @@ export function synthesizeEventsFromMessages(
         turnId,
         turnStartedAtMs,
         emittedCompactOperations,
-        durableCompactPartsByOperation,
+        durableCompactParts,
         emittedGoalVerifications,
         goalVerificationsByAnchor,
         onModelChange: recordTimelineModel,
@@ -1915,7 +2063,7 @@ export function synthesizeEventsFromMessages(
           turnId,
           turnStartedAtMs,
           emittedCompactOperations,
-          durableCompactPartsByOperation,
+          durableCompactParts,
           emittedGoalVerifications,
           goalVerificationsByAnchor,
           onModelChange: recordTimelineModel,
@@ -1960,7 +2108,7 @@ export function synthesizeEventsFromMessages(
         turnId,
         turnStartedAtMs,
         emittedCompactOperations,
-        durableCompactPartsByOperation,
+        durableCompactParts,
         emittedGoalVerifications,
         goalVerificationsByAnchor,
         onModelChange: recordTimelineModel,
@@ -2020,7 +2168,7 @@ export function synthesizeEventsFromMessages(
       turnId,
       turnStartedAtMs,
       emittedCompactOperations,
-      durableCompactPartsByOperation,
+      durableCompactParts,
       emittedGoalVerifications,
       goalVerificationsByAnchor,
       onModelChange: recordTimelineModel,

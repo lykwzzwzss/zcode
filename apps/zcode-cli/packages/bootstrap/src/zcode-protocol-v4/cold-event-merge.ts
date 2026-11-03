@@ -1,8 +1,11 @@
 import {
   SessionEventType,
   selectActiveConversationBranch,
+  type MessagePart,
   type MessageWithParts,
-  type SessionEntryInfo,
+  type SessionInfo,
+  type SessionId,
+  type SessionStorePort,
   type SessionEvent,
   type SessionGoal,
   type TurnFileChangeSummary,
@@ -10,6 +13,11 @@ import {
 } from "@zcode/contracts";
 import type { ConversationSnapshot } from "@zcode/shared/zcode-protocol-v4";
 import {
+  collectRangeScopedCompactOperations,
+  compactEventBoundaryIdentity,
+  compactPartDedupeKey,
+  compactionOperationKey,
+  compactRangeDedupeKey,
   goalVerificationEntriesFromSessionEntries,
   synthesizeEventsFromMessages,
   type HydratedGoalVerificationEntry,
@@ -25,25 +33,13 @@ export interface ConversationMaterializationSource {
   target?: SessionGoal | null;
 }
 
-interface PersistedConversationMaterializationStore {
-  getSession(sessionId: import("@zcode/contracts").SessionId): Promise<{
-    title?: string;
-    revert?: {
-      branchCutAfterMessageID?: import("@zcode/contracts").MessageId;
-      branchGeneration?: number;
-      createdMessageID?: import("@zcode/contracts").MessageId;
-      keptMessageIDs?: import("@zcode/contracts").MessageId[];
-      targetMessageID?: import("@zcode/contracts").MessageId;
-    };
-  } | null>;
-  messages(input: { sessionID: import("@zcode/contracts").SessionId }): Promise<MessageWithParts[]>;
-  readTarget(input: {
-    sessionID: import("@zcode/contracts").SessionId;
-  }): Promise<SessionGoal | null>;
-  sessionEntries?(input: {
-    sessionID: import("@zcode/contracts").SessionId;
-    type?: string;
-  }): Promise<SessionEntryInfo[]>;
+interface PersistedConversationMaterializationStore extends Pick<
+  SessionStorePort,
+  "messages" | "readTarget"
+> {
+  // 复用存储契约中的 revert 结构，避免投影层复制一份字段后随上游演进失配。
+  getSession(sessionId: SessionId): Promise<Partial<Pick<SessionInfo, "title" | "revert">> | null>;
+  sessionEntries?: SessionStorePort["sessionEntries"];
 }
 
 /**
@@ -68,7 +64,7 @@ export async function loadPersistedConversationMaterialization(input: {
       messages: [],
     };
   }
-  const sessionID = input.sessionId as import("@zcode/contracts").SessionId;
+  const sessionID = input.sessionId as SessionId;
   const [session, allMessages, target, entries] = await Promise.all([
     input.store.getSession(sessionID),
     input.persistedMessages ?? input.store.messages({ sessionID }),
@@ -89,15 +85,9 @@ export async function loadPersistedConversationMaterialization(input: {
       message.info.semantics?.kind === "shared_context",
   );
   const sharedContextEntry = entries.find((entry) => entry.type === "v4/shared_context_import");
-  const sharedContextData =
-    sharedContextEntry?.data && typeof sharedContextEntry.data === "object"
-      ? (sharedContextEntry.data as Record<string, unknown>)
-      : undefined;
-  const contextId =
-    typeof sharedContextData?.contextId === "string" ? sharedContextData.contextId : undefined;
-  const shareUrl =
-    typeof sharedContextData?.shareUrl === "string" ? sharedContextData.shareUrl : undefined;
-  const status = sharedContextData?.status;
+  const contextId = stringField(sharedContextEntry?.data, "contextId");
+  const shareUrl = stringField(sharedContextEntry?.data, "shareUrl");
+  const status = stringField(sharedContextEntry?.data, "status");
   const sharedContextImport =
     sharedContextMessage && session?.title?.trim()
       ? contextId &&
@@ -335,61 +325,41 @@ function resumedSubagentLifecycleEventIndexes(events: readonly SessionEvent[]): 
 }
 
 function queueStateEventIndexes(events: readonly SessionEvent[]): Set<number> {
-  const queuedLifecycleById = new Map<string, number[]>();
-  const latestDispatchById = new Map<string, number>();
-  const latestDeliveryChangeById = new Map<string, number>();
-  const pendingIds = new Set<string>();
+  // 同一 pending input 的生命周期只有一个 owner；移除时一次删掉，避免三个 map 清理不一致。
+  const pending = new Map<string, { queued: number[]; dispatch?: number; delivery?: number }>();
   let latestReorder: number | null = null;
   let latestAutoDrain: number | null = null;
   let latestFollowupMode: number | null = null;
 
   events.forEach((event, index) => {
+    const id = stringField(event.payload, "pendingInputId");
     if (event.type === SessionEventType.TurnSteerQueued) {
-      const id = stringField(event.payload, "pendingInputId");
       if (id) {
-        pendingIds.add(id);
-        const lifecycle = queuedLifecycleById.get(id) ?? [];
-        lifecycle.push(index);
-        queuedLifecycleById.set(id, lifecycle);
+        const state = pending.get(id) ?? { queued: [] };
+        state.queued.push(index);
+        pending.set(id, state);
       }
       return;
     }
-    if (event.type === SessionEventType.TurnSteerDispatchChanged) {
-      const id = stringField(event.payload, "pendingInputId");
-      if (id) latestDispatchById.set(id, index);
+    if (
+      event.type === SessionEventType.TurnSteerDispatchChanged ||
+      event.type === SessionEventType.TurnSteerDeliveryChanged
+    ) {
+      const state = id ? pending.get(id) : undefined;
+      if (state)
+        state[event.type === SessionEventType.TurnSteerDispatchChanged ? "dispatch" : "delivery"] =
+          index;
       return;
     }
-    if (event.type === SessionEventType.TurnSteerDeliveryChanged) {
-      const id = stringField(event.payload, "pendingInputId");
-      if (id) latestDeliveryChangeById.set(id, index);
-      return;
-    }
-    if (event.type === SessionEventType.TurnSteerDrained) {
-      for (const id of stringArrayField(event.payload, "pendingInputIds")) {
-        pendingIds.delete(id);
-        queuedLifecycleById.delete(id);
-        latestDispatchById.delete(id);
-        latestDeliveryChangeById.delete(id);
-      }
-      return;
-    }
-    if (event.type === SessionEventType.TurnSteerDiscarded) {
-      for (const id of stringArrayField(event.payload, "pendingInputIds")) {
-        pendingIds.delete(id);
-        queuedLifecycleById.delete(id);
-        latestDispatchById.delete(id);
-        latestDeliveryChangeById.delete(id);
-      }
+    if (
+      event.type === SessionEventType.TurnSteerDrained ||
+      event.type === SessionEventType.TurnSteerDiscarded
+    ) {
+      for (const id of stringArrayField(event.payload, "pendingInputIds")) pending.delete(id);
       return;
     }
     if (event.type === SessionEventType.SessionInputPromoted) {
-      const id = stringField(event.payload, "pendingInputId");
-      if (id) {
-        pendingIds.delete(id);
-        queuedLifecycleById.delete(id);
-        latestDispatchById.delete(id);
-        latestDeliveryChangeById.delete(id);
-      }
+      if (id) pending.delete(id);
       return;
     }
     if (event.type === SessionEventType.TurnSteerReordered) latestReorder = index;
@@ -398,19 +368,16 @@ function queueStateEventIndexes(events: readonly SessionEvent[]): Set<number> {
   });
 
   const keep = new Set<number>();
-  for (const id of pendingIds) {
-    const queuedLifecycle = queuedLifecycleById.get(id) ?? [];
-    const dispatch = latestDispatchById.get(id);
-    const deliveryChange = latestDeliveryChangeById.get(id);
+  for (const { queued, dispatch, delivery } of pending.values()) {
     // editQueueItem 在旧事件里可能只重发新 text，完整 intent/附件/来源
     // 仍只在首次 queued 事件。从空投影 cold replay 时必须保留该 id
     // 自最近一次 admission 起的全部 queued 生命周期，让 reducer 原地合并字段。
-    for (const queued of queuedLifecycle) keep.add(queued);
-    const latestQueued = queuedLifecycle.at(-1) ?? -1;
+    for (const index of queued) keep.add(index);
+    const latestQueued = queued.at(-1) ?? -1;
     if (dispatch !== undefined && dispatch > latestQueued) keep.add(dispatch);
-    if (deliveryChange !== undefined && deliveryChange > latestQueued) keep.add(deliveryChange);
+    if (delivery !== undefined && delivery > latestQueued) keep.add(delivery);
   }
-  if (latestReorder !== null && pendingIds.size > 0) keep.add(latestReorder);
+  if (latestReorder !== null && pending.size > 0) keep.add(latestReorder);
   if (latestAutoDrain !== null) keep.add(latestAutoDrain);
   if (latestFollowupMode !== null) keep.add(latestFollowupMode);
   return keep;
@@ -456,6 +423,7 @@ function goalKey(payload: unknown): string | null {
 function durableBoundaryKeys(
   messages: readonly MessageWithParts[],
   goalEntries: readonly HydratedGoalVerificationEntry[],
+  rangeScopedCompactOperations: ReadonlySet<string>,
 ): DurableBoundaryKeys {
   const compact = new Set<string>();
   const fork = new Set<string>();
@@ -464,6 +432,18 @@ function durableBoundaryKeys(
     const key = goalKey(entry.payload);
     if (key) goal.add(key);
   }
+  // ranges-v1（选择性区间压缩）下同一 operationId 有 N 条 compaction part，每段一条
+  // boundary。operation 级键仍必须登记：内存 CompactStarted/Completed/Failed 只带
+  // operationId，冷合并靠它抑制已由 transcript 覆盖的事件；再登记逐段边界键，避免
+  // 去重集合把整个 operation 只记成一条边界。legacy 单 part 没有第二个身份，逐段键
+  // 与 operation 键等价，抑制结果不变。
+  const recordCompactPart = (part: MessagePart): void => {
+    const operationKey = compactionOperationKey(part);
+    if (operationKey === null) return;
+    compact.add(operationKey);
+    const rangeKey = compactPartDedupeKey(part, rangeScopedCompactOperations);
+    if (rangeKey !== null) compact.add(rangeKey);
+  };
   for (const message of messages) {
     for (const part of message.parts) {
       if (part.type === "timeline") {
@@ -471,14 +451,14 @@ function durableBoundaryKeys(
           const key = goalKey(part);
           if (key) goal.add(key);
         } else if (part.timelineType === "context_compaction") {
-          compact.add(String(part.operationId));
+          recordCompactPart(part);
         } else if (part.timelineType === "session_fork") {
           fork.add(`${String(part.parentSessionId)}\u0000${String(part.targetMessageId)}`);
         }
         continue;
       }
       if (part.type === "compaction") {
-        compact.add(String(part.operationId ?? part.boundaryId ?? `legacy-compact-${part.id}`));
+        recordCompactPart(part);
       }
     }
   }
@@ -487,21 +467,35 @@ function durableBoundaryKeys(
 
 function durableBoundaryKeyForEvent(
   event: SessionEvent,
-): { key: string | null; kind: keyof DurableBoundaryKeys } | null {
+  rangeScopedCompactOperations: ReadonlySet<string>,
+): { kind: keyof DurableBoundaryKeys; keys: readonly string[] } | null {
   if (event.type === SessionEventType.TargetCompletionVerification) {
-    return { kind: "goal", key: goalKey(event.payload) };
+    const key = goalKey(event.payload);
+    return { kind: "goal", keys: key ? [key] : [] };
   }
   if (
     event.type === SessionEventType.CompactStarted ||
     event.type === SessionEventType.CompactCompleted ||
     event.type === SessionEventType.CompactFailed
   ) {
-    return { kind: "compact", key: stringField(event.payload, "operationId") };
+    const operationId = stringField(event.payload, "operationId");
+    if (!operationId) return { kind: "compact", keys: [] };
+    // ranges-v1：事件 boundaryId/summaryMessageId 取最后一段；先按逐段键匹配（与
+    // durableBoundaryKeys 的逐段登记对称），未命中再回退 operation 级键，保证
+    // legacy 数据或边界字段缺失时仍按旧语义抑制重复事件。
+    const keys = [operationId];
+    const boundaryIdentity = rangeScopedCompactOperations.has(operationId)
+      ? compactEventBoundaryIdentity(event.payload)
+      : null;
+    if (boundaryIdentity !== null) {
+      keys.unshift(compactRangeDedupeKey(operationId, boundaryIdentity));
+    }
+    return { kind: "compact", keys };
   }
   if (event.type === SessionEventType.SessionForked) {
     const parent = stringField(event.payload, "originalSessionId");
     const target = stringField(event.payload, "targetMessageId");
-    return { kind: "fork", key: parent && target ? `${parent}\u0000${target}` : null };
+    return { kind: "fork", keys: parent && target ? [`${parent}\u0000${target}`] : [] };
   }
   return null;
 }
@@ -778,7 +772,12 @@ export function mergeColdConversationEvents(input: MergeInput): ColdEventMergeRe
   const supplements: SessionEvent[] = [];
   const prefixEventsByTurnId = new Map<string, SessionEvent[]>();
   const boundaryEventsByTurnId = new Map<string, SessionEvent[]>();
-  const boundaryKeys = durableBoundaryKeys(durableMessages, durableGoalEntries);
+  const rangeScopedCompactOperations = collectRangeScopedCompactOperations(durableMessages);
+  const boundaryKeys = durableBoundaryKeys(
+    durableMessages,
+    durableGoalEntries,
+    rangeScopedCompactOperations,
+  );
   const turnByMessageId = durableTurnByMessageId(durableMessages, durableEvents);
   const turnByRuntimeAnchor = durableTurnByRuntimeAnchor(durableMessages, turnByMessageId);
   const hookTurnIdByInvocationId = hookInvocationTurnIds(input.memoryEvents);
@@ -823,9 +822,9 @@ export function mergeColdConversationEvents(input: MergeInput): ColdEventMergeRe
       }
       return;
     }
-    const boundary = durableBoundaryKeyForEvent(event);
+    const boundary = durableBoundaryKeyForEvent(event, rangeScopedCompactOperations);
     if (boundary) {
-      if (boundary.key && boundaryKeys[boundary.kind].has(boundary.key)) {
+      if (boundary.keys.some((key) => boundaryKeys[boundary.kind].has(key))) {
         recordDiagnostic(diagnostics, "cold_merge.durable_event_suppressed", event);
         return;
       }

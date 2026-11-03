@@ -14,6 +14,7 @@ import {
   MessageHistoryImpl,
   countContextPrefixMessages,
   realUserRuntimeMetadata,
+  withMessageId,
 } from "../src/agent/message-history.js";
 import { hydrateMessageHistoryFromSession } from "../src/agent/session-history-hydrator.js";
 import { buildRuntimeUserEntriesFromTurn } from "../src/runtime/helpers/conversation.js";
@@ -1224,7 +1225,8 @@ describe("session history hydrator", () => {
       '<plugin_reference>\nPlugins:\n- id: "demo@mkt-a"\n  skills: ["demo:search"]\n  mcp_servers: []\n</plugin_reference>';
     const liveHistory = new MessageHistoryImpl();
     liveHistory.init("system prompt");
-    liveHistory.addUser("use the referenced plugin", realUserRuntimeMetadata());
+    // 与 turn.ts 的生产路径一致：user 消息持久化 id 会同步打到 runtime entry 上。
+    liveHistory.addUser("use the referenced plugin", realUserRuntimeMetadata(), promptID);
     liveHistory.addAttachment("plugin_reference", reminder);
 
     await hydrateMessageHistoryFromSession({
@@ -1616,7 +1618,7 @@ describe("session history hydrator", () => {
     } satisfies ResolvedTurnAttachment;
     const liveHistory = new MessageHistoryImpl();
     liveHistory.init("system prompt");
-    liveHistory.addEntries(buildRuntimeUserEntriesFromTurn("", [resolvedAttachment]));
+    liveHistory.addEntries(withMessageId(buildRuntimeUserEntriesFromTurn("", [resolvedAttachment]), userID));
 
     const hydratedHistory = new MessageHistoryImpl();
     hydratedHistory.init("system prompt");
@@ -1846,7 +1848,7 @@ describe("session history hydrator", () => {
     } satisfies ResolvedTurnAttachment;
     const liveHistory = new MessageHistoryImpl();
     liveHistory.init("system prompt");
-    liveHistory.addEntries(buildRuntimeUserEntriesFromTurn("", [resolvedAttachment]));
+    liveHistory.addEntries(withMessageId(buildRuntimeUserEntriesFromTurn("", [resolvedAttachment]), userID));
 
     const hydratedHistory = new MessageHistoryImpl();
     hydratedHistory.init("system prompt");

@@ -438,7 +438,7 @@ describe("NodePluginAdapter", () => {
       http_proxy: "http://ambient-proxy:8080",
     });
 
-    expect(env).toMatchObject({
+    const expected = {
       ALL_PROXY: "http://127.0.0.1:7890",
       CURL_CA_BUNDLE: "/tmp/root-ca.pem",
       GIT_SSL_CAINFO: "/tmp/root-ca.pem",
@@ -453,7 +453,15 @@ describe("NodePluginAdapter", () => {
       http_proxy: "http://127.0.0.1:7890",
       https_proxy: "http://127.0.0.1:7890",
       no_proxy: "localhost,127.0.0.1",
-    });
+    };
+    // Windows 环境变量名不区分大小写，子进程环境会合并同名键；按平台比较同一组值。
+    const normalize = (value: Record<string, unknown>) =>
+      process.platform === "win32"
+        ? Object.fromEntries(
+            Object.entries(value).map(([key, entry]) => [key.toLowerCase(), entry]),
+          )
+        : value;
+    expect(normalize(env)).toMatchObject(normalize(expected));
   });
 
   // Finding #4 (defense-in-depth): the lowest-level discovery adapter must drop official

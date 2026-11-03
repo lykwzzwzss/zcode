@@ -446,6 +446,40 @@ therefore exposes tools such as `mcp__ios_simulator__ios_preflight`; a server
 named `android-emulator` exposes tools such as
 `mcp__android_emulator__android_preflight`.
 
+### System Prompts
+
+插件可以贡献追加到 stable system prompt 的正文段。三段声明形式：
+
+- `manifest.systemPrompt`：inline 字符串；
+- `manifest.systemPromptPath`：相对插件根目录的文本文件，仅在未声明 `systemPrompt` 时读取；
+- `manifest.systemPrompts`：多段数组，条目为 `{ name?, order?, content? | path? }`。
+
+示例：
+
+```json
+{
+  "name": "team-conventions",
+  "systemPrompts": [
+    { "name": "review-rules", "order": 10, "path": "prompts/review.md" },
+    { "name": "style", "order": 20, "content": "Prefer small, focused patches." }
+  ]
+}
+```
+
+约束：
+
+- 路径必须是插件根内相对路径；绝对路径、`..` 逃逸与 realpath 指向根外的符号链接都会被
+  拒绝并记 `plugin_system_prompt_outside_root` 诊断。
+  - 单段正文上限 32 KiB；全部启用插件最终注入合计上限 64 KiB（`PLUGIN_SYSTEM_PROMPTS_TOTAL_MAX_BYTES`）。
+    超限的一段被丢弃并记诊断，后续段不再尝试。台账按 trim 后正文和完整包装标签的 UTF-8
+    字节计量；最多 64 段，段名最多 128 字符，pluginId 最多 512 字符。标签属性转义后再计量，
+    adapter 与 Runtime 复用同一准备函数，不能启动时放行、发送时再静默裁掉。
+- 只注入启用插件的段；同正文去重；段顺序由 `order`（默认 100）稳定排序决定，跨插件共享同一顺序空间。
+- 注入时每段包在 `<plugin_system_prompt name="..." plugin="...">` 边界标签内，标明第三方来源。
+- 显式 `customSystemPrompt`（整段替换）、子代理与 workflow actor 不注入这些段。
+  `customSystemPrompt` 仅含空白时视为未设置，与 ContextBuilder 的默认正文判断一致，仍注入插件段。
+- 读取失败、正文为空、畸形条目都只产生 `plugin_system_prompt_*` 诊断，不阻断插件其他组件加载。
+
 ## Variable Expansion
 
 Plugin component config may reference:

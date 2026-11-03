@@ -50,6 +50,8 @@ describe("workspace hook trust contracts", () => {
         "PermissionRequest",
         "PostToolUse",
         "PostToolUseFailure",
+        "PreCompact",
+        "PostCompact",
         "Stop",
       ],
       // onError 进声明摘要（shared/workspace-hook-digest.ts），改了要重新信任。

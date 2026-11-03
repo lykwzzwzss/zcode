@@ -151,7 +151,10 @@ function buildDesktopWindowVisualOptions() {
 
   if (process.platform === "win32") {
     return {
-      backgroundColor: "#00000000",
+      // 启动早期 renderer 还没画出自己的根背景，8 位 alpha 的透明底色在 Windows 上
+      // 会被合成成黑色，表现为窗口顶部与右侧各一条黑边。这里改用不透明白，
+      // 由 renderer 的根背景（深色主题也由它覆盖）接手续画；圆角仍由 renderer 绘制。
+      backgroundColor: "#ffffffff",
       // Windows 窗口操作由 renderer 绘制，禁用原生标题栏，避免出现两套按钮。
       frame: false,
       backgroundMaterial: "acrylic" as const,

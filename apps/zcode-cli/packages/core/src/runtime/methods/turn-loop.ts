@@ -12,6 +12,7 @@ import { buildToolSearchAnnouncement } from "../../tool/search/exposure.js";
 import {
   CompactPhase,
   CompactReason,
+  CompactTrigger,
   createMessageId,
   traceContextToLogContext,
   TurnMachineImpl,
@@ -46,6 +47,8 @@ import {
   recordCompactSuccess,
 } from "./turn-loop-state.js";
 import type { RegularTurnLoopState } from "./turn-loop-state.js";
+import { buildCompactNudgeEntry } from "./compact-nudge.js";
+import { buildContextIndexEntry } from "./context-index.js";
 import { consumeSettledProjectMemoryRecall } from "../helpers/project-memory-recall.js";
 import { consumePendingProjectMemoryUpdate } from "../helpers/project-memory-dream.js";
 import { ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH } from "../../memory/project-memory-retrieval-branch.js";
@@ -98,6 +101,28 @@ export async function runRegularTurnLoop(
     const tools = getTurnTools(this, state);
     finishTools();
 
+    const contextTools = getTurnTools(this, state);
+    if (this.config.taskType !== "subagent_child") {
+      // nudge 是 per_current_turn：必须在折叠判定之前清掉上一步的提醒。
+      // 否则折叠时它还在 activeEntries 里，可能被保留段克隆进 canonical history；
+      // 清理放在“生成新提醒”之后时，这条路就漏了。稍后按当前水位重新决定是否注入。
+      state.turnRequestState.entries = state.turnRequestState.entries.filter(
+        (entry) =>
+          !(
+            entry.kind === "attachment" &&
+            (entry.metadata?.source === "compact_nudge" ||
+              entry.metadata?.source === "compact_result")
+          ),
+      );
+    }
+
+    // 上下文索引同样是 per_current_turn：必须在折叠判定之前清掉上一轮的索引。
+    // 否则折叠会把它当成 activeEntries 的一部分，可能被保留段克隆进 canonical history，
+    // 让一份过时的 id 列表永久留在上下文里。稍后按当前水位重新生成。
+    state.turnRequestState.entries = state.turnRequestState.entries.filter(
+      (entry) => !(entry.kind === "attachment" && entry.metadata?.source === "context_index"),
+    );
+
     // 输入附件在 compaction 之前运行：本轮输入或上一批工具结果产生的项属于 compaction
     // 保留或摘要的历史。只在有新输入时收集（轮首、完整工具批次之后、文本回复后续上 guide）；
     // 新轮通知的首个请求跳过。
@@ -130,6 +155,48 @@ export async function runRegularTurnLoop(
     });
     throwIfTurnAborted(state.turnAbortSignal);
 
+    // 模型通过 CompactNow 排队的折叠：必须在工具批次结束之后、下一次请求之前落地。
+    // 与阈值触发的折叠共用同一条执行路径，只是不经过阈值判断。
+    const pendingCompact = this.pendingCompactRequest;
+    let compactFeedback: RuntimeMessageEntry | undefined;
+    if (pendingCompact) {
+      this.pendingCompactRequest = undefined;
+      const requestedCompact = await this.compactActiveConversation(
+        pendingCompact.instructions,
+        state.turnTraceContext,
+        state.events,
+        {
+          abortSignal: state.turnAbortSignal,
+          // 选择性区间压缩：把模型点名的区间原样交给 compact 执行侧，
+          // 是否支持由执行侧校验（不支持时必须整单拒绝，不能退化成前缀折叠）。
+          ...(pendingCompact.ranges ? { ranges: pendingCompact.ranges } : {}),
+          // task_shift / user_request 是模型主动要求，不该在 telemetry 里记成阈值折叠；
+          // context_pressure 才归 context_limit。trigger 仍用 Auto 以保留重试语义。
+          compactReason:
+            pendingCompact.reason === "user_request" || pendingCompact.reason === "task_shift"
+              ? CompactReason.UserRequested
+              : CompactReason.ContextLimit,
+          phase: compactPhase,
+          trigger: CompactTrigger.Auto,
+          activeEntries: state.turnRequestState.entries,
+          getContinuationTools: () => getTurnTools(this, state),
+          model: state.model,
+        },
+      );
+      if (requestedCompact.outcome === "compacted") {
+        state.turnRequestState.entries = requestedCompact.entries;
+        // 与阈值折叠同一套记账：不归零会让 rapid-refill 熔断按折叠前的计数累计。
+        recordCompactSuccess(state, evaluateRapidRefill(state.compactTracking));
+        recordCompactHistoryRound(state);
+      } else {
+        // 排队成功不等于已应用；拒绝原因必须回到模型，否则会反复提交错误端点或误以为已压缩。
+        compactFeedback = systemReminderAttachmentEntry(
+          "compact_result",
+          `Requested CompactNow was skipped: ${requestedCompact.displayText}`,
+        );
+      }
+    }
+
     const rapidRefill = evaluateRapidRefill(state.compactTracking);
     const autoCompactOutcome = await this.autoCompactIfNeeded(
       state.turnTraceContext,
@@ -157,6 +224,33 @@ export async function runRegularTurnLoop(
     if (autoCompactOutcome === "compacted") {
       recordCompactSuccess(state, rapidRefill);
       recordCompactHistoryRound(state);
+    }
+    // 放在所有折叠之后，只影响本次请求；下一步清除，不能被复制到持久历史。
+    if (compactFeedback) appendTurnRequestEntries(state.turnRequestState, [compactFeedback]);
+    // 增长提醒：放在自动折叠之后——刚折完水位已降，不该再催一次。
+    // 子代理运行时没有 compactControlPort，催它调一个必然 rejected 的工具没有意义。
+    if (this.config.taskType !== "subagent_child") {
+      // 上一步的提醒已在迭代开头清掉；这里只按当前水位决定是否重新注入。
+      const compactNudge = buildCompactNudgeEntry(
+        this,
+        state.turnRequestState.entries,
+        state.model,
+        contextTools,
+      );
+      if (compactNudge) {
+        appendTurnRequestEntries(state.turnRequestState, [compactNudge]);
+      }
+    }
+    // 消息索引也放在折叠之后：它必须描述折叠后的上下文，且不能作为折叠输入。
+    // 与 nudge 一样只进当轮请求（appendTurnRequestEntries），不写 messageHistory。
+    const contextIndex = buildContextIndexEntry(
+      this,
+      state.turnRequestState.entries,
+      state.model,
+      contextTools,
+    );
+    if (contextIndex) {
+      appendTurnRequestEntries(state.turnRequestState, [contextIndex]);
     }
     throwIfTurnAborted(state.turnAbortSignal);
 

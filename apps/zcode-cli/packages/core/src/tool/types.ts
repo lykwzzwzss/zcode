@@ -1,4 +1,4 @@
-import type { ToolSearchExecutionContext, ModelCallWrapper } from "@zcode/contracts";
+import type { CompactRangeInput, ToolSearchExecutionContext, ModelCallWrapper } from "@zcode/contracts";
 import type { McpToolUiDescriptor } from "@zcode/shared/mcp-apps";
 // ============================================================
 // Tool Types - Core tool types for registry and executor
@@ -182,6 +182,12 @@ export interface ToolExecutionContext {
   offPeakPort?: OffPeakPort;
   topicResourcePort?: TopicResourcePort;
   sessionStore?: SessionStorePort;
+  /**
+   * 模型自决折叠的排期口（CompactNow）。除 subagent_child 外都注入：subagent_child 在
+   * tool-allowlist 里根本不注册 CompactNow；workflow actor / workflow_child 有独立会话历史，
+   * 折叠只作用于它们自己的会话，不会去改主会话的历史。
+   */
+  compactControlPort?: CompactControlPort;
   sessionModePort?: SessionModePort;
   workflowPort?: WorkflowPort;
   /** workflow run 提交端口；缺席则 CreateWorkflow 回占位诊断而不启动。 */
@@ -214,6 +220,21 @@ export interface ToolExecutionContext {
    * `applied`）。handler 据它告诉模型「实际跑的不是你传的那个值」；缺席即没有调整。
    */
   inputAdjustments?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * 模型自决折叠的排期口。requestCompact 只排队、不折叠：
+ * 真正的折叠发生在 turn-loop 的下一个安全点（工具批次结束后、下一次请求前）。
+ */
+export interface CompactControlPort {
+  requestCompact(input: {
+    instructions?: string;
+    ranges?: readonly CompactRangeInput[];
+    reason?: string;
+  }): {
+    accepted: boolean;
+    reason?: string;
+  };
 }
 
 export interface ToolEmbeddedSearchContext {

@@ -292,6 +292,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
         pluginMcpServers: pluginOutcome.mcpServers,
         builtInMcpServers,
         pluginRuntimeFeatures,
+        pluginSystemPrompts: pluginOutcome.systemPrompts,
         builtInSubagentModelSelectionOverrides:
           zcodeSubagentProfileOutcome.builtInModelSelectionOverrides,
         subagentOutputRootDir: join(cliStorageRoot, "agents"),

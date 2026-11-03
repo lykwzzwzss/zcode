@@ -49,10 +49,16 @@ describe("incoming message trusted producers", () => {
       midTurn,
     );
     const marker = midTurn ? "subagent_reply_steer" : "subagent_reply";
-    expect(target.messageHistory.toRuntimeEntries()[0]?.metadata).toEqual({
-      source: "legacy_synthetic",
-      inputPresentation: marker,
+    // 内存 entry 与落盘的 synthetic user 消息必须共用同一个 messageID，冷恢复水合才能对齐。
+    const persistedNotice = vi.mocked(target.persistSyntheticUserNoticeForSession).mock.calls[0]?.[0] as
+      | { messageID?: string }
+      | undefined;
+    const [entry] = target.messageHistory.toRuntimeEntries();
+    expect(entry).toMatchObject({
+      metadata: { source: "legacy_synthetic", inputPresentation: marker },
+      messageId: persistedNotice?.messageID,
     });
+    expect(persistedNotice?.messageID).toEqual(expect.any(String));
     expect(target.persistSyntheticUserNoticeForSession).toHaveBeenCalledWith(
       expect.objectContaining({
         text: "<subagent-message>raw</subagent-message>",
@@ -80,15 +86,21 @@ describe("incoming message trusted producers", () => {
             { type: "text", text: "one" },
             { type: "text", text: "two" },
           ];
-      expect(target.messageHistory.toRuntimeEntries()).toEqual([
-        {
-          message: { role: "user", content },
-          metadata: {
-            source: "legacy_synthetic",
-            inputPresentation: midTurn ? "task_notification_steer" : "task_notification",
-          },
+      const persistedNotice = vi.mocked(target.persistSyntheticUserNoticeForSession).mock.calls[0]?.[0] as
+        | { messageID?: string }
+        | undefined;
+      const entries = target.messageHistory.toRuntimeEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        message: { role: "user", content },
+        metadata: {
+          source: "legacy_synthetic",
+          inputPresentation: midTurn ? "task_notification_steer" : "task_notification",
         },
-      ]);
+        // 同一批通知落盘与内存 entry 共用 messageID。
+        messageId: persistedNotice?.messageID,
+      });
+      expect(persistedNotice?.messageID).toEqual(expect.any(String));
       expect(target.persistSyntheticUserNoticeForSession).toHaveBeenCalledOnce();
       expect(target.persistSyntheticUserNoticeForSession).toHaveBeenCalledWith(
         expect.objectContaining({ text: midTurn ? "one\n\ntwo" : ["one", "two"] }),

@@ -1036,6 +1036,77 @@ describe("session fork history", () => {
     });
   });
 
+  it("remaps ranges-v1 compactRange ids for the child transcript", () => {
+    const summaryId = "msg_range_summary" as MessageId;
+    const startId = "msg_range_start" as MessageId;
+    const endId = "msg_range_end" as MessageId;
+    const part = {
+      id: partId("range_compaction"),
+      sessionID: SESSION_ID,
+      messageID: summaryId,
+      type: "compaction",
+      auto: false,
+      metadata: {
+        compactFormat: "ranges-v1",
+        hierarchy: {
+          memberMessageIds: [startId, endId],
+          childBoundaryIds: ["older-boundary"],
+          level: 2,
+          originalMessageCount: 3,
+        },
+        compactRange: {
+          endMessageId: endId,
+          rangeId: "range_1",
+          startMessageId: startId,
+          summaryMessageId: summaryId,
+        },
+      },
+    } as MessagePart;
+    const messageIdMap = new Map<MessageId, MessageId>([
+      [summaryId, "msg_child_range_summary" as MessageId],
+      [startId, "msg_child_range_start" as MessageId],
+      [endId, "msg_child_range_end" as MessageId],
+    ]);
+
+    const cloned = clonePartForFork(part, {
+      forkedSessionId: "ses_range_child" as never,
+      nextMessageId: "msg_child_range_summary" as MessageId,
+      messageIdMap,
+      strictLocalReferences: true,
+    });
+
+    expect(cloned).toMatchObject({
+      metadata: {
+        compactFormat: "ranges-v1",
+        hierarchy: {
+          memberMessageIds: ["msg_child_range_start", "msg_child_range_end"],
+          childBoundaryIds: ["older-boundary"],
+          level: 2,
+          originalMessageCount: 3,
+        },
+        compactRange: {
+          endMessageId: "msg_child_range_end",
+          rangeId: "range_1",
+          startMessageId: "msg_child_range_start",
+          summaryMessageId: "msg_child_range_summary",
+        },
+      },
+    });
+
+    // 端点未进入 child transcript 时必须拒绝 fork，否则子会话冷恢复会静默退回未裁切历史。
+    expect(() =>
+      clonePartForFork(part, {
+        forkedSessionId: "ses_range_child" as never,
+        nextMessageId: "msg_child_range_summary" as MessageId,
+        messageIdMap: new Map<MessageId, MessageId>([
+          [summaryId, "msg_child_range_summary" as MessageId],
+          [startId, "msg_child_range_start" as MessageId],
+        ]),
+        strictLocalReferences: true,
+      }),
+    ).toThrow(/compact hierarchy memberMessageId/);
+  });
+
   it("stable fork golden remap 覆盖 message/part/turn/compact/goal/verifier 全部 child-local identity", async () => {
     const user = userMessage("msg_golden_user" as MessageId, "golden", 1);
     const assistant = assistantMessage(

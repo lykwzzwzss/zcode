@@ -75,6 +75,8 @@ export interface HookRunOptions {
 export interface HookRunResult {
   additionalContexts: string[];
   blockRequested?: boolean;
+  /** PreCompact 钩子给出的折叠摘要；非空时宿主直接采用，跳过模型摘要请求。 */
+  compactionSummary?: string;
   hookPermissionDecisionReason?: string;
   permissionBehavior?: HookPermissionDecision;
   permissionRequestResult?: PermissionRequestHookDecision;

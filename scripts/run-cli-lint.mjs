@@ -6,7 +6,11 @@ import { dirname, resolve, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicy } from "./architecture/policy.mjs";
 import { pristineUpstreamFiles } from "./architecture/upstream-admission.mjs";
-import { classifyLintDiagnostics, parseLintCommand } from "./cli-lint-admission.mjs";
+import {
+  classifyLintDiagnostics,
+  parseLintCommand,
+  packageManagerCommand,
+} from "./cli-lint-admission.mjs";
 
 const exec = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -39,9 +43,10 @@ async function main() {
       // 沿用各包解析出的 oxlint 版本、cwd 和原参数；包级配置仍由 oxlint 自己读取。
       const pnpm = process.env.npm_execpath;
       if (!pnpm) throw new Error("请通过 pnpm lint 运行 CLI lint");
+      const command = packageManagerCommand(pnpm, process.execPath, ["exec", "oxlint", ...args]);
       let result;
       try {
-        result = await exec(process.execPath, [pnpm, "exec", "oxlint", ...args], {
+        result = await exec(command.file, command.args, {
           cwd,
           maxBuffer: 16 * 1024 * 1024,
         });
@@ -63,15 +68,18 @@ async function main() {
         console.log(
           `${manifest.name}: ${item.severity} ${item.filename} ${item.code}: ${item.message}`,
         );
-      if (groups.accepted.length)
-        console.log(`${manifest.name}: 接纳 ${groups.accepted.length} 项原样上游 max-lines 存量`);
+      // 保留已登记的上游行数基线，但不能隐藏原始错误的文件、级别与原因。
+      for (const item of groups.accepted)
+        console.log(
+          `${manifest.name}: [pristine upstream baseline] ${item.severity} ${item.filename} ${item.code}: ${item.message}`,
+        );
       errors += groups.errors.length;
       warnings += groups.warnings.length;
       accepted += groups.accepted.length;
     }
   }
   console.log(
-    `CLI lint: ${errors} errors, ${warnings} warnings, ${accepted} pristine upstream line-count diagnostics`,
+    `CLI lint: ${errors} blocking errors, ${warnings} warnings, ${accepted} accepted upstream line-count errors`,
   );
   return errors ? 1 : 0;
 }

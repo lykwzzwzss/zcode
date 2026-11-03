@@ -38,6 +38,7 @@ import type {
 } from "@zcode/contracts";
 import type { HookRunner } from "../../hooks/index.js";
 import type { PermissionService } from "../../permission/service.js";
+import type { CompactControlPort } from "../types.js";
 import type { RuntimeTaskRegistry } from "../../runtime-task/registry.js";
 import type { ToolRegistry } from "../registry.js";
 import type { ToolSchedule } from "../scheduler.js";
@@ -112,6 +113,8 @@ export interface ToolExecutorOptions {
   offPeakPort?: OffPeakPort;
   topicResourcePort?: TopicResourcePort;
   sessionStore?: SessionStorePort;
+  /** 模型自决折叠的排期口；缺席则 CompactNow 报端口不可用。 */
+  compactControlPort?: CompactControlPort;
   sessionModePort?: SessionModePort;
   workflowPort?: WorkflowPort;
   /** workflow run 端口；按工具名查表时 CreateWorkflow 的后台生命周期提供者。 */
@@ -239,6 +242,8 @@ export interface ToolExecutorDeps {
   offPeakPort?: OffPeakPort;
   topicResourcePort?: TopicResourcePort;
   sessionStore?: SessionStorePort;
+  /** 模型自决折叠的排期口；缺席则 CompactNow 报端口不可用。 */
+  compactControlPort?: CompactControlPort;
   sessionModePort?: SessionModePort;
   workflowPort?: WorkflowPort;
   /** workflow run 端口；按工具名查表时 CreateWorkflow 的后台生命周期提供者。 */

@@ -567,9 +567,66 @@ export interface CompactionPart {
   metadata?: CompactionPartMetadata;
 }
 
+/**
+ * 一次折叠摘要请求自身的 token 计量，字段直接对应 provider 上报的 ModelUsage。
+ * 全部可选：provider 没回传的维度必须保持 undefined，不能用 0 冒充「没有缓存」，
+ * 否则读侧无法区分「真的零命中」和「这次没拿到数据」。
+ */
+export interface CompactCacheUsage {
+  inputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  outputTokens?: number;
+}
+
+/**
+ * 一次选择性区间压缩中单个区间的持久化记录。
+ * 端点与摘要都是同一 session 内已落盘消息的 id；读侧按 boundary 消息的物理顺序
+ * （即写入顺序）逐条重放，把 [startMessageId, endMessageId] 原位替换为 summaryMessageId。
+ * 区间之外的消息保持原顺序，后续区间不能与已处理区间重叠。
+ */
+export interface CompactRangeMetadata {
+  /** 本次操作内的区间标识，仅用于排障；不参与定位。 */
+  rangeId?: string;
+  /** 被折叠区间的首条消息 id（含）。 */
+  startMessageId: MessageId;
+  /** 被折叠区间的末条消息 id（含）。 */
+  endMessageId: MessageId;
+  /** 替换该区间的摘要消息 id；缺省时取 compaction part 所在消息自身。 */
+  summaryMessageId?: MessageId;
+}
+
 export interface CompactionPartMetadata {
+  /** 原生递归分层的直接成员、子节点与深度；与摘要在同一 bundle 提交。 */
+  hierarchy?: import("../context-memory/contract.js").ContextFoldMetadata;
   /** summary 之前的请求前公告；冷恢复放回 summary 之前，切片之后的保留段时跳过。 */
   compactLeadingMessageIds?: MessageId[];
+  /**
+   * 增量折叠保留的上一代摘要消息。和 leading 一样是 provider-context 语义：
+   * fork 必须按 child message id 重映射，否则子会话冷恢复时匹配不到、整层摘要丢失。
+   */
+  compactRetainedMessageIds?: MessageId[];
+  /**
+   * 这次折叠本身花了多少：摘要请求的 provider usage，而不是折叠后的上下文体积。
+   * 旧 boundary 没有该字段，读侧按「未知」降级；不写进 strict 的 compactBoundary，
+   * 避免冷恢复/rewind 的 boundary schema 解析拒绝历史数据。
+   */
+  cacheUsage?: CompactCacheUsage;
+  /**
+   * 这次折叠把哪些更早的摘要层真正并进了新摘要（被并层的 boundaryId，按旧→新排列、已去重）。
+   * 只记录「被重写进本次摘要」的层；仅被保留的层仍由 compactRetainedMessageIds 表达。
+   * DecompressContext（tier="summary"）靠它把「摘要消息已不在」的旧 boundary 解析到
+   * 覆盖它的最新摘要；放在宽松 metadata 里而不是 strict boundary，避免旧版本解析历史数据失败。
+   */
+  coversBoundaryIds?: string[];
+  /**
+   * 选择性区间压缩（ranges 模式）的 per-range 记录：这条摘要原位替换哪一段消息。
+   * 放在宽松 metadata 而不是 strict compactBoundary，旧版本按 JSON 读取时忽略，
+   * 不会因新增字段拒绝历史数据；新版本按 boundary 消息物理顺序重放。
+   */
+  compactRange?: CompactRangeMetadata;
+  /** 持久化格式标记："ranges-v1" 表示该 boundary 由选择性区间压缩写入。 */
+  compactFormat?: "ranges-v1";
 }
 
 export type TimelinePartDisplay = "separator" | "worklog";
@@ -1116,6 +1173,8 @@ export interface LocalSettingStorePort {
 }
 
 export interface SessionStorePort {
+  /** 有界原文检索/分页能力；SQLite 始终提供，三个记忆读取工具要求配置该端口。 */
+  contextArchive?: import("../context-memory/contract.js").ContextArchivePort;
   createSession(input: CreateSessionInput): Promise<SessionInfo>;
   /** legacy 兼容原语；V4 stable/compact-edit fork 禁止调用，统一走 commitForkBundle。 */
   createForkedSessionWithMetadata?(

@@ -7,6 +7,7 @@ import type { AgentRuntimeInternal } from "../internal.js";
 import type { SealBackgroundTaskNotificationsInput } from "../types.js";
 import { shouldSuppressSealedSubagentBashNotification } from "../../runtime-task/notification-policy.js";
 import { joinTaskNotificationBatch } from "../../runtime-task/notification.js";
+import { recoverCommittedCompactApply } from "./compact-active-helpers.js";
 
 export function enqueueBackgroundTaskNotification(
   this: AgentRuntimeInternal,
@@ -180,11 +181,16 @@ export async function persistBackgroundTaskNotificationBatch(
   // 一个文本块，模型看到的和冷恢复读回的都按块包装，边界不靠猜。轮中通知每条单独入队，不成批。
   const blocks = !midTurn && texts.length > 1 ? texts : undefined;
   await this.ensureContextInitialized(firstCommand.traceContext);
+  // 先恢复已提交的压缩，否则后续重放会覆盖这里刚加入的后台消息。
+  recoverCommittedCompactApply(this);
   const messageID = createMessageId();
   const inputPresentation = midTurn ? "task_notification_steer" : "task_notification";
+  // 内存 entry 与落盘 synthetic user 消息必须共用同一个 messageID：冷恢复会给
+  // 这条消息按持久化 id 水合，live 侧不带 id 时两边 id 不一致。
   this.messageHistory.addUser(
     blocks ? blocks.map((block) => ({ type: "text" as const, text: block })) : text,
     runtimeInputMetadata(inputPresentation),
+    messageID,
   );
   await this.persistSyntheticUserNoticeForSession({
     messageID,

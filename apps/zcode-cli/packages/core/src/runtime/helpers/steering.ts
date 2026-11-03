@@ -22,9 +22,7 @@ export function previewInput(value: string): string {
   return `${normalized.slice(0, TURN_STEER_INPUT_PREVIEW_CHARS)}...`;
 }
 
-export function findLatestUserMessageFromEnd(
-  messages: ModelInputMessage[],
-): number | undefined {
+export function findLatestUserMessageFromEnd(messages: ModelInputMessage[]): number | undefined {
   for (let index = messages.length - 1; index >= 0; index--) {
     if (messages[index]?.role === "user") {
       return messages.length - 1 - index;
@@ -52,9 +50,7 @@ export function cloneMessageForFork(
     sessionId: String(message.sessionID),
     messageId: String(message.id),
   };
-  const anchor = message.anchor
-    ? cloneMessageAnchorForFork(message.anchor, options)
-    : undefined;
+  const anchor = message.anchor ? cloneMessageAnchorForFork(message.anchor, options) : undefined;
   if (message.role === "user") {
     return {
       ...message,
@@ -90,11 +86,7 @@ function cloneMessageAnchorForFork(
     }
     return mapped ?? id;
   };
-  const mapIdentity = (
-    id: string,
-    map: Map<string, string> | undefined,
-    field: string,
-  ): string => {
+  const mapIdentity = (id: string, map: Map<string, string> | undefined, field: string): string => {
     const mapped = map?.get(id);
     if (!mapped && options.strictLocalReferences) {
       throw new Error(`Fork ${field} has no child-local identity: ${id}`);
@@ -126,11 +118,7 @@ function cloneMessageAnchorForFork(
     ...anchor,
     ...(anchor.turnId
       ? {
-          turnId: mapIdentity(
-            String(anchor.turnId),
-            options.turnIdMap,
-            "anchor turn",
-          ) as TurnId,
+          turnId: mapIdentity(String(anchor.turnId), options.turnIdMap, "anchor turn") as TurnId,
         }
       : {}),
     ...(anchor.productTurnId
@@ -151,10 +139,7 @@ function cloneMessageAnchorForFork(
       : {}),
     ...(anchor.boundaryMessageId
       ? {
-          boundaryMessageId: mapMessage(
-            anchor.boundaryMessageId,
-            "anchor boundaryMessageId",
-          ),
+          boundaryMessageId: mapMessage(anchor.boundaryMessageId, "anchor boundaryMessageId"),
         }
       : {}),
     ...(goalBoundary ? { goalBoundary } : {}),
@@ -230,10 +215,7 @@ export function clonePartForFork(
       }
     }
     if (cloned.timelineType === "context_compaction" && cloned.summaryMessageId) {
-      cloned.summaryMessageId = mapMessage(
-        cloned.summaryMessageId,
-        "timeline summaryMessageId",
-      );
+      cloned.summaryMessageId = mapMessage(cloned.summaryMessageId, "timeline summaryMessageId");
     }
     if (cloned.timelineType === "goal_verification") {
       const targetId = options.targetIdMap?.get(cloned.targetId);
@@ -263,6 +245,51 @@ export function clonePartForFork(
           const mapped = messageIdMap.get(id);
           return mapped ? [mapped] : [];
         }),
+      };
+    }
+    const retainedIds: unknown = cloned.metadata?.compactRetainedMessageIds;
+    if (Array.isArray(retainedIds)) {
+      // 保留摘要在冷恢复时按 child message id 匹配；不重映射的话子会话里一层都放不回来。
+      cloned.metadata = {
+        ...cloned.metadata,
+        compactRetainedMessageIds: retainedIds.flatMap((id) => {
+          const mapped = messageIdMap.get(id);
+          return mapped ? [mapped] : [];
+        }),
+      };
+    }
+    const compactRange = cloned.metadata?.compactRange;
+    const hierarchy = cloned.metadata?.hierarchy;
+    if (hierarchy) {
+      cloned.metadata = {
+        ...cloned.metadata,
+        hierarchy: {
+          ...hierarchy,
+          memberMessageIds: hierarchy.memberMessageIds.map((id) =>
+            mapMessage(id, "compact hierarchy memberMessageId"),
+          ),
+          childBoundaryIds: [...hierarchy.childBoundaryIds],
+        },
+      };
+    }
+    if (compactRange) {
+      // ranges-v1 的覆盖声明同样指向父会话消息：不重映射的话 fork 后冷恢复定位失败，
+      // 整条 ranges 链会退回未裁切历史（安全但静默失去压缩效果）。
+      cloned.metadata = {
+        ...cloned.metadata,
+        compactRange: {
+          ...compactRange,
+          endMessageId: mapMessage(compactRange.endMessageId, "compact range endMessageId"),
+          startMessageId: mapMessage(compactRange.startMessageId, "compact range startMessageId"),
+          ...(compactRange.summaryMessageId
+            ? {
+                summaryMessageId: mapMessage(
+                  compactRange.summaryMessageId,
+                  "compact range summaryMessageId",
+                ),
+              }
+            : {}),
+        },
       };
     }
     if (cloned.compactBoundary) {
@@ -312,9 +339,7 @@ export function clonePartForFork(
               },
             }
           : {}),
-        ...(boundary.turnId
-          ? { turnId: mapTurn(boundary.turnId, "compact boundary turnId") }
-          : {}),
+        ...(boundary.turnId ? { turnId: mapTurn(boundary.turnId, "compact boundary turnId") } : {}),
       };
     }
   }

@@ -1,4 +1,6 @@
 import type { MigrationResult } from "@zcode/shared/sqlite-migrations";
+import type { ContextArchivePort } from "@zcode/contracts/context-memory";
+import { createSqliteContextArchive } from "../../native-context/contract.js";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import * as permissionFullAccessRepository from "./repositories/permission-full-access.js";
@@ -194,6 +196,21 @@ function assertForkBundleChildLocal(bundle: ForkCommitBundle): void {
         for (const id of Array.isArray(leadingIds) ? leadingIds : []) {
           assertMessage(id, "compact leading announcement");
         }
+        const retainedIds = part.metadata?.compactRetainedMessageIds;
+        for (const id of Array.isArray(retainedIds) ? retainedIds : []) {
+          assertMessage(id, "compact retained summary");
+        }
+        // ranges-v1 的区间端点/摘要 id 必须也是 child-local：不校验的话 fork 后
+        // 冷恢复定位失败，整条 ranges 链会静默退回未裁切历史。
+        const compactRange = part.metadata?.compactRange;
+        if (compactRange) {
+          assertMessage(compactRange.startMessageId, "compact range startMessageId");
+          assertMessage(compactRange.endMessageId, "compact range endMessageId");
+          assertMessage(compactRange.summaryMessageId, "compact range summaryMessageId");
+        }
+        for (const id of part.metadata?.hierarchy?.memberMessageIds ?? []) {
+          assertMessage(id, "compact hierarchy memberMessageId");
+        }
       }
       if (part.type === "tool" && part.state.status === "completed") {
         for (const attachment of part.state.attachments ?? []) {
@@ -238,6 +255,7 @@ export class SqliteSessionStore
     UsageStorePort
 {
   private readonly db: DatabaseSync;
+  readonly contextArchive: ContextArchivePort;
   private readonly dbPath: string;
   private readonly forkCommitFaultAt?: ForkCommitFaultStage;
   private dwfJournalStore?: JournalStorePort;
@@ -249,11 +267,15 @@ export class SqliteSessionStore
     readonly migrationResult: MigrationResult,
   ) {
     this.db = db;
+    this.contextArchive = createSqliteContextArchive(db);
     this.dbPath = dbPath;
     this.forkCommitFaultAt = options.forkCommitFaultAt;
   }
 
-  static async open(options: SqliteSessionStoreOptions = {}, migrationOptions?: AsyncSqliteMigrationOptions): Promise<SqliteSessionStore> {
+  static async open(
+    options: SqliteSessionStoreOptions = {},
+    migrationOptions?: AsyncSqliteMigrationOptions,
+  ): Promise<SqliteSessionStore> {
     const dbPath = options.dbPath ?? getDefaultSessionDbPath();
     const startupLockTimeoutMs =
       options.startupLockTimeoutMs ?? DEFAULT_SQLITE_STARTUP_LOCK_TIMEOUT_MS;
@@ -273,15 +295,26 @@ export class SqliteSessionStore
       });
     }
     try {
-      const migration = await runSqliteSessionMigrationsAsync(db, dbPath, migrationOptions ?? { lockWaitTimeoutMs: startupLockTimeoutMs });
+      const migration = await runSqliteSessionMigrationsAsync(
+        db,
+        dbPath,
+        migrationOptions ?? { lockWaitTimeoutMs: startupLockTimeoutMs },
+      );
       return new SqliteSessionStore(db, dbPath, options, migration);
     } catch (error) {
-      try { db.close(); } catch { /* 关闭失败不能覆盖迁移错误。 */ }
+      try {
+        db.close();
+      } catch {
+        /* 关闭失败不能覆盖迁移错误。 */
+      }
       throw error;
     }
   }
 
-  static async openStartup(options: SqliteSessionStoreOptions = {}, migrationOptions: AsyncSqliteMigrationOptions = {}) {
+  static async openStartup(
+    options: SqliteSessionStoreOptions = {},
+    migrationOptions: AsyncSqliteMigrationOptions = {},
+  ) {
     return SqliteSessionStore.open(options, migrationOptions);
   }
 

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createTestModelSelection } from "./test-model-selection.js";
 import { createTestModelFormatProperties } from "./test-runtime-model.js";
@@ -41,6 +42,14 @@ import {
   type TodoItem,
 } from "@zcode/contracts";
 import { createTestAgentRuntime } from "./test-agent-runtime.js";
+import type { AgentRuntimeInternal } from "../src/runtime/internal.js";
+import { createRuntimeCommandId } from "../src/runtime/command-queue.js";
+import { emitControlOnlyUserTurn } from "../src/runtime/methods/control-only-turn.js";
+import {
+  appendTurnOutcomeEvent,
+  createTurnFailureError,
+} from "../src/runtime/helpers/turn-errors.js";
+import { activeSessionMessages } from "../src/agent/session-history-hydrator.js";
 import { countContinuePrompts } from "./runtime-output-token-continuation-test-helpers.js";
 import {
   buildCompactPrompt,
@@ -64,6 +73,7 @@ import { createToolRegistry } from "../src/tool/registry.js";
 import { createReadFileStatePathKey } from "../src/tool/read-file-state.js";
 import type { ReadFileStateEntry, ReadFileStateMap } from "../src/tool/types.js";
 import { estimateCurrentModelInputTokens } from "../src/runtime/methods/compact.js";
+import { estimateRuntimeEntryTokens } from "../src/runtime/helpers/compact-selection.js";
 import { resolveApprovedPlanFilePath } from "../src/runtime/helpers/plan-file-continuity.js";
 import { MemoryFileSystem } from "./memory-test-utils.js";
 import { createTestSessionEventStore } from "./test-event-store.js";
@@ -365,6 +375,7 @@ describe("runtime compact helpers", () => {
 
   it("builds the compact prompt used by active compaction", () => {
     const fullPrompt = buildCompactPrompt("Keep exact file paths.");
+    expect(fullPrompt).not.toContain("<analysis>");
 
     expect(fullPrompt).toContain("CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.");
     expect(fullPrompt).toContain("Tool calls will be REJECTED and will waste your only turn");
@@ -1721,19 +1732,19 @@ describe("AgentRuntime manual compact", () => {
 
   it("re-reads recent files from disk after compact and keeps them in the live read state", async () => {
     const sessionId = createSessionId("runtime-compact-read-state-reminder");
-    const workspace = "/tmp/zcode-runtime-compact-read-state";
+    const workspace = resolve("/tmp/zcode-runtime-compact-read-state");
     const requests: Array<Array<{ role: string; content: string }>> = [];
     let normalResponseCount = 0;
     const files = {
-      current: `${workspace}/src/current.ts`,
-      range: `${workspace}/src/range.ts`,
-      large: `${workspace}/src/large.ts`,
-      written: `${workspace}/src/written.ts`,
-      unreadable: `${workspace}/src/unreadable.ts`,
-      bashBackfill: `${workspace}/src/bash-backfill.ts`,
-      instructions: `${workspace}/AGENTS.md`,
+      current: resolve(`${workspace}/src/current.ts`),
+      range: resolve(`${workspace}/src/range.ts`),
+      large: resolve(`${workspace}/src/large.ts`),
+      written: resolve(`${workspace}/src/written.ts`),
+      unreadable: resolve(`${workspace}/src/unreadable.ts`),
+      bashBackfill: resolve(`${workspace}/src/bash-backfill.ts`),
+      instructions: resolve(`${workspace}/AGENTS.md`),
       plan: resolveApprovedPlanFilePath({ sessionId, workspaceRoot: workspace }),
-      memory: "/Users/dev/.codex/memories/private-note.md",
+      memory: resolve("/Users/dev/.codex/memories/private-note.md"),
     };
     // 修复原因：读取失败时曾直接取错误的 code，抛出的不是对象（如 null）时会让整个 compact 失败。
     class NonErrorThrowingFileSystem extends MemoryFileSystem {
@@ -1934,11 +1945,11 @@ describe("AgentRuntime manual compact", () => {
 
   it("skips files denied by read rules and reads ask-rule files without prompting", async () => {
     const sessionId = createSessionId("runtime-compact-read-state-permission");
-    const workspace = "/tmp/zcode-runtime-compact-read-state-permission";
+    const workspace = resolve("/tmp/zcode-runtime-compact-read-state-permission");
     const store = createRecordingSessionStore();
     const eventStore = createTestSessionEventStore();
-    const denied = `${workspace}/src/denied.ts`;
-    const asked = `${workspace}/src/asked.ts`;
+    const denied = resolve(`${workspace}/src/denied.ts`);
+    const asked = resolve(`${workspace}/src/asked.ts`);
     const fileSystemPort = new MemoryFileSystem({
       [denied]: "export const denied = 'secret';\n",
       [asked]: "export const asked = 'visible';\n",
@@ -2018,9 +2029,9 @@ describe("AgentRuntime manual compact", () => {
 
   it("cancels compact when a restore read is aborted and keeps the read state", async () => {
     const sessionId = createSessionId("runtime-compact-read-state-abort");
-    const workspace = "/tmp/zcode-runtime-compact-read-state-abort";
+    const workspace = resolve("/tmp/zcode-runtime-compact-read-state-abort");
     const store = createRecordingSessionStore();
-    const file = `${workspace}/src/current.ts`;
+    const file = resolve(`${workspace}/src/current.ts`);
     const controller = new AbortController();
     class AbortingFileSystem extends MemoryFileSystem {
       override async readTextFileRange(
@@ -2118,13 +2129,13 @@ describe("AgentRuntime manual compact", () => {
       },
     };
 
-    const filePath = "/tmp/zcode-runtime-compact-read-state-resume/src/current.ts";
+    const filePath = resolve("/tmp/zcode-runtime-compact-read-state-resume/src/current.ts");
     const fileSystemPort = new MemoryFileSystem({ [filePath]: "export const persisted = 42;\n" });
     const runtime = createTestAgentRuntime(
       sessionId,
       {
         systemPrompt: "You are a compact persisted read-state reminder test agent.",
-        workingDirectory: "/tmp/zcode-runtime-compact-read-state-resume",
+        workingDirectory: resolve("/tmp/zcode-runtime-compact-read-state-resume"),
       },
       {
         eventStore: createTestSessionEventStore(),
@@ -2155,7 +2166,7 @@ describe("AgentRuntime manual compact", () => {
       sessionId,
       {
         systemPrompt: "You are a compact persisted read-state reminder test agent.",
-        workingDirectory: "/tmp/unused-before-resume",
+        workingDirectory: resolve("/tmp/unused-before-resume"),
       },
       {
         eventStore: createTestSessionEventStore(),
@@ -2181,7 +2192,7 @@ describe("AgentRuntime manual compact", () => {
       .join("\n");
 
     expect(postResumeContext).toContain(
-      `Called the Read tool with the following input: {"file_path":"${filePath}"}`,
+      `Called the Read tool with the following input: ${JSON.stringify({ file_path: filePath })}`,
     );
     expect(postResumeContext).toContain("1\texport const persisted = 42;");
     expect(postResumeContext).not.toContain("Recent file read before compact");
@@ -2195,7 +2206,8 @@ describe("AgentRuntime manual compact", () => {
     const requests: Array<{ messages: Array<{ content: unknown; role: string }> }> = [];
     const planMarker = "E2E_PLAN_FILE_COMPACT_CONTINUITY_MARKER";
     const fileSystemPort = new MemoryFileSystem({
-      "/workspace/project/.zcode/plans/plan-sess_runtime-compact-plan-file-reference.md": `1. Preserve ${planMarker}\n2. Continue after compact`,
+      [resolve("/workspace/project/.zcode/plans/plan-sess_runtime-compact-plan-file-reference.md")]:
+        `1. Preserve ${planMarker}\n2. Continue after compact`,
     });
     const modelImplementation = {
       async generateText(request: {
@@ -2224,7 +2236,7 @@ describe("AgentRuntime manual compact", () => {
       sessionId,
       {
         systemPrompt: "You are a compact plan-file reference test agent.",
-        workingDirectory: "/workspace/project",
+        workingDirectory: resolve("/workspace/project"),
       },
       {
         eventStore,
@@ -2267,7 +2279,7 @@ describe("AgentRuntime manual compact", () => {
       sessionId,
       {
         systemPrompt: "You are a compact plan-file reference test agent.",
-        workingDirectory: "/workspace/unused-before-resume",
+        workingDirectory: resolve("/workspace/unused-before-resume"),
       },
       {
         eventStore,
@@ -3269,13 +3281,13 @@ describe("AgentRuntime manual compact", () => {
     const store = createRecordingSessionStore({
       failTextPartContaining: secondReminderMarker,
     });
-    const firstFile = "/tmp/zcode-runtime-compact-reminder-persist-fail/src/first.ts";
-    const secondFile = "/tmp/zcode-runtime-compact-reminder-persist-fail/src/second.ts";
+    const firstFile = resolve("/tmp/zcode-runtime-compact-reminder-persist-fail/src/first.ts");
+    const secondFile = resolve("/tmp/zcode-runtime-compact-reminder-persist-fail/src/second.ts");
     const runtime = createTestAgentRuntime(
       sessionId,
       {
         systemPrompt: "You are a compact reminder persistence failure test agent.",
-        workingDirectory: "/tmp/zcode-runtime-compact-reminder-persist-fail",
+        workingDirectory: resolve("/tmp/zcode-runtime-compact-reminder-persist-fail"),
       },
       {
         eventStore,
@@ -3912,7 +3924,7 @@ describe("AgentRuntime manual compact", () => {
 
     await runtime.executeTurn("auto compact ptl warmup setup");
     await runtime.executeTurn(longPrompt);
-    const result = await runtime.executeTurn("continue after auto compact ptl failure");
+    await expect(runtime.executeTurn("continue after auto compact ptl failure")).rejects.toThrow();
 
     const events = await eventStore.getEvents(sessionId);
     const compactModelRetries = events
@@ -3928,13 +3940,11 @@ describe("AgentRuntime manual compact", () => {
       )
       .map((event) => event.payload as any);
 
-    expect(result.response).toBe("normal response 3");
-    expect(requests.map((request) => request.kind)).toEqual([
-      "normal",
-      "normal",
-      "compact",
-      "normal",
-    ]);
+    expect(requests.map((request) => request.kind)).toEqual(["normal", "normal", "compact"]);
+    expect(events.some((event) => event.type === SessionEventType.TurnError)).toBe(true);
+    expect(
+      JSON.stringify(events.find((event) => event.type === SessionEventType.TurnError)?.payload),
+    ).toContain("prompt is too long");
     expect(compactModelRetries).toEqual([0]);
     expect(timelinePayloads).toEqual([
       expect.objectContaining({
@@ -4091,7 +4101,13 @@ describe("AgentRuntime manual compact", () => {
               }
 
               normalRequestCount++;
-              if (lastContent.includes("run the large read tool")) {
+              // 临时压力提醒现在留在尾部，不能再假定请求末条就是用户正文。
+              if (
+                request.messages.some(
+                  (message) => providerContentToText(message.content) === "run the large read tool",
+                ) &&
+                !request.messages.some((message) => message.role === "tool")
+              ) {
                 return {
                   finishReason: "tool-calls",
                   providerMetadata: undefined,
@@ -4534,6 +4550,51 @@ describe("AgentRuntime manual compact", () => {
     expect(postCompactRequest).not.toContain("normal response 1");
   });
 
+  it("reports a reactive compaction failure instead of hiding it behind the original overflow", async () => {
+    const sessionId = createSessionId("runtime-reactive-compact-failure-visible");
+    const eventStore = createTestSessionEventStore();
+    let normalRequests = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "Reactive failure test." },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              normalRequests++;
+              if (
+                providerContentToText(request.messages.at(-1)?.content).includes("trigger overflow")
+              ) {
+                throw createContextExceededError();
+              }
+              return {
+                finishReason: "stop",
+                text: "ok",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+    await runtime.executeTurn("first reactive setup");
+    await runtime.executeTurn("second reactive setup");
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    vi.spyOn(internal, "compactActiveConversation").mockRejectedValueOnce(
+      new Error("reactive summary storage unavailable"),
+    );
+    await expect(runtime.executeTurn("trigger overflow")).rejects.toMatchObject({
+      cause: expect.objectContaining({ message: "reactive summary storage unavailable" }),
+    });
+    expect(normalRequests).toBe(3);
+    const errors = (await eventStore.getEvents(sessionId)).filter(
+      (event) => event.type === SessionEventType.TurnError,
+    );
+    expect(errors).toHaveLength(1);
+    expect(JSON.stringify(errors[0]?.payload)).toContain("reactive summary storage unavailable");
+  });
+
   it("uses the original reactive prompt-too-long gap before the first compact request", async () => {
     const sessionId = createSessionId("runtime-reactive-compact-initial-gap");
     const eventStore = createTestSessionEventStore();
@@ -4733,12 +4794,12 @@ describe("AgentRuntime manual compact", () => {
       },
     };
 
-    const readFilePath = "/tmp/zcode-reactive-compact-resume-tail/src/current.ts";
+    const readFilePath = resolve("/tmp/zcode-reactive-compact-resume-tail/src/current.ts");
     const runtime = createTestAgentRuntime(
       sessionId,
       {
         systemPrompt: "You are a reactive compact resume-tail test agent.",
-        workingDirectory: "/tmp/zcode-reactive-compact-resume-tail",
+        workingDirectory: resolve("/tmp/zcode-reactive-compact-resume-tail"),
       },
       {
         eventStore: createTestSessionEventStore(),
@@ -4774,7 +4835,7 @@ describe("AgentRuntime manual compact", () => {
       indexOrder(postCompactContext ?? "", [
         "Reactive resume summary",
         "normal response 2",
-        `Called the Read tool with the following input: {"file_path":"${readFilePath}"}`,
+        `Called the Read tool with the following input: ${JSON.stringify({ file_path: readFilePath })}`,
         "trigger reactive resume overflow",
       ]),
     ).toBe(true);
@@ -4808,7 +4869,7 @@ describe("AgentRuntime manual compact", () => {
       indexOrder(postResumeContext ?? "", [
         "Reactive resume summary",
         "normal response 2",
-        `Called the Read tool with the following input: {"file_path":"${readFilePath}"}`,
+        `Called the Read tool with the following input: ${JSON.stringify({ file_path: readFilePath })}`,
         "trigger reactive resume overflow",
         "continue after reactive compact resume",
       ]),
@@ -5935,11 +5996,12 @@ describe("AgentRuntime manual compact", () => {
     expect(requests.some((content) => content.includes("create a detailed summary"))).toBe(false);
   });
 
-  it("stops retrying auto compact after consecutive failures reach the circuit breaker", async () => {
+  it("reports auto compact failures and the circuit breaker until manual compact succeeds", async () => {
     const sessionId = createSessionId("runtime-auto-compact-circuit-breaker");
     const eventStore = createTestSessionEventStore();
     let compactAttempts = 0;
     let normalAttempts = 0;
+    let summaryWorks = false;
     const runtime = createTestAgentRuntime(
       sessionId,
       {
@@ -5961,7 +6023,7 @@ describe("AgentRuntime manual compact", () => {
                 compactAttempts++;
                 return {
                   finishReason: "stop",
-                  text: "",
+                  text: summaryWorks ? "<summary>recovered summary</summary>" : "",
                   usage: { inputTokens: 10, outputTokens: 0, totalTokens: 10 },
                 };
               }
@@ -5980,12 +6042,24 @@ describe("AgentRuntime manual compact", () => {
 
     await runtime.executeTurn("first circuit breaker prompt");
     await runtime.executeTurn("second circuit breaker prompt");
-    await runtime.executeTurn("third circuit breaker prompt");
-    await runtime.executeTurn("fourth circuit breaker prompt");
+    await expect(runtime.executeTurn("third circuit breaker prompt")).rejects.toThrow();
+    await expect(runtime.executeTurn("fourth circuit breaker prompt")).rejects.toThrow();
+    await expect(runtime.executeTurn("fifth circuit breaker prompt")).rejects.toMatchObject({
+      cause: {
+        type: CoreErrorType.InvalidStateTransition,
+        message: expect.stringContaining("/compact"),
+      },
+    });
 
     const events = await eventStore.getEvents(sessionId);
     expect(compactAttempts).toBe(6);
-    expect(normalAttempts).toBe(4);
+    expect(normalAttempts).toBe(2);
+    expect(events.filter((event) => event.type === SessionEventType.TurnError)).toHaveLength(3);
+    expect(
+      JSON.stringify(
+        events.filter((event) => event.type === SessionEventType.TurnError).at(-1)?.payload,
+      ),
+    ).toContain("/compact");
     expect(
       events
         .filter((event) => event.type === SessionEventType.CompactFailed)
@@ -6003,6 +6077,587 @@ describe("AgentRuntime manual compact", () => {
       }),
     ]);
     expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+    summaryWorks = true;
+    await runtime.executeTurn("/compact");
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    expect(internal.autoCompactConsecutiveFailures).toBe(0);
+    await runtime.executeTurn("continue after manual compact succeeds");
+    expect(normalAttempts).toBe(3);
+  });
+
+  function compactWithHooks(
+    runtime: ReturnType<typeof createTestAgentRuntime>,
+    customInstructions?: string,
+  ): Promise<unknown> {
+    const internals = runtime as unknown as {
+      compactActiveConversation(
+        customInstructions: string | undefined,
+        traceContext: { traceId: string },
+        events: unknown[],
+        options: {
+          compactReason: CompactReason;
+          phase: CompactPhase;
+          trigger: CompactTrigger;
+        },
+      ): Promise<unknown>;
+    };
+    return internals.compactActiveConversation(
+      customInstructions,
+      { traceId: "trace-compact-hooks" },
+      [],
+      {
+        compactReason: CompactReason.UserRequested,
+        phase: CompactPhase.StandaloneTurn,
+        trigger: CompactTrigger.Manual,
+      },
+    );
+  }
+
+  it("merges PreCompact additionalContext into the summary request", async () => {
+    const sessionId = createSessionId("runtime-compact-hook-additional-context");
+    const eventStore = createTestSessionEventStore();
+    const summaryPrompts: Array<string> = [];
+    const hookRunner = createInMemoryHookRunner({
+      hooks: [
+        {
+          event: HookEventName.PreCompact,
+          callback: async () => ({
+            hookSpecificOutput: {
+              additionalContext: "HOOK_COMPACT_INSTRUCTION",
+              hookEventName: HookEventName.PreCompact,
+            },
+          }),
+        },
+      ],
+    });
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a PreCompact instruction test agent." },
+      {
+        eventStore,
+        hookRunner,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                summaryPrompts.push(lastContent);
+                return {
+                  finishReason: "stop",
+                  text: "<summary>Hook instruction summary.</summary>",
+                  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+                };
+              }
+
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("first hook instruction setup");
+    await runtime.executeTurn("second hook instruction setup");
+    const result = (await compactWithHooks(runtime, "USER_INSTRUCTION")) as { outcome: string };
+
+    expect(result.outcome).toBe("compacted");
+    expect(summaryPrompts).toHaveLength(1);
+    expect(summaryPrompts[0]).toContain("HOOK_COMPACT_INSTRUCTION");
+    expect(summaryPrompts[0]).toContain("USER_INSTRUCTION");
+
+    const events = await eventStore.getEvents(sessionId);
+    const boundary = events.find((event) => event.type === SessionEventType.CompactBoundary);
+    expect((boundary?.payload as CompactBoundaryPayload).customInstructions).toBe(true);
+  });
+
+  it("skips the summary model when PreCompact returns compactionSummary", async () => {
+    const sessionId = createSessionId("runtime-compact-hook-host-summary");
+    const eventStore = createTestSessionEventStore();
+    const turnContexts: Array<string> = [];
+    let summaryCalls = 0;
+    const hookRunner = createInMemoryHookRunner({
+      hooks: [
+        {
+          event: HookEventName.PreCompact,
+          callback: async () => ({
+            hookSpecificOutput: {
+              compactionSummary: "HOST_PROVIDED_SUMMARY",
+              hookEventName: HookEventName.PreCompact,
+            },
+          }),
+        },
+      ],
+    });
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a PreCompact host summary test agent." },
+      {
+        eventStore,
+        hookRunner,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                summaryCalls++;
+                return {
+                  finishReason: "stop",
+                  text: "<summary>Model summary should not be used.</summary>",
+                  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+                };
+              }
+
+              turnContexts.push(
+                request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n"),
+              );
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("first host summary setup");
+    await runtime.executeTurn("second host summary setup");
+    const result = (await compactWithHooks(runtime)) as { outcome: string };
+
+    expect(result.outcome).toBe("compacted");
+    expect(summaryCalls).toBe(0);
+
+    await runtime.executeTurn("after host summary");
+    expect(turnContexts.at(-1)).toContain("HOST_PROVIDED_SUMMARY");
+
+    const events = await eventStore.getEvents(sessionId);
+    expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(true);
+  });
+
+  it("cancels compaction when PreCompact blocks", async () => {
+    const sessionId = createSessionId("runtime-compact-hook-blocked");
+    const eventStore = createTestSessionEventStore();
+    const hookRunner = createInMemoryHookRunner({
+      hooks: [
+        {
+          event: HookEventName.PreCompact,
+          callback: async () => ({ continue: false, reason: "VETO_COMPACT_NOW" }),
+        },
+      ],
+    });
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a PreCompact block test agent." },
+      {
+        eventStore,
+        hookRunner,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              return {
+                finishReason: "stop",
+                text: lastContent.includes("create a detailed summary")
+                  ? "<summary>blocked compact summary</summary>"
+                  : "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("first blocked compact setup");
+    await runtime.executeTurn("second blocked compact setup");
+    const result = (await compactWithHooks(runtime)) as {
+      displayText: string;
+      outcome: string;
+    };
+
+    expect(result.outcome).toBe("skipped");
+    expect(result.displayText).toContain("VETO_COMPACT_NOW");
+
+    const events = await eventStore.getEvents(sessionId);
+    expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+    const compactCompleted = events.find(
+      (event) => event.type === SessionEventType.CompactCompleted,
+    );
+    expect(compactCompleted?.payload).toMatchObject({
+      status: CompactTimelineStatus.Skipped,
+      trigger: CompactTrigger.Manual,
+    });
+  });
+
+  it("merges PreCompact additionalContext into every ranges summary request", async () => {
+    const sessionId = createSessionId("runtime-compact-hook-ranges-instruction");
+    const eventStore = createTestSessionEventStore();
+    const summaryPrompts: Array<string> = [];
+    const hookRunner = createInMemoryHookRunner({
+      hooks: [
+        {
+          event: HookEventName.PreCompact,
+          callback: async () => ({
+            hookSpecificOutput: {
+              additionalContext: "RANGE_HOOK_INSTRUCTION",
+              hookEventName: HookEventName.PreCompact,
+            },
+          }),
+        },
+      ],
+    });
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a ranges PreCompact instruction test agent." },
+      {
+        eventStore,
+        hookRunner,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                summaryPrompts.push(lastContent);
+                return {
+                  finishReason: "stop",
+                  text: "<summary>Ranges hook instruction summary.</summary>",
+                  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+                };
+              }
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("first ranges hook setup");
+    await runtime.executeTurn("second ranges hook setup");
+    const entries = readRuntimeEntries(runtime);
+    const firstUser = entries.find(
+      (entry) =>
+        entry.kind !== "attachment" &&
+        entry.message.role === "user" &&
+        entry.messageId !== undefined,
+    );
+    expect(firstUser?.messageId).toBeDefined();
+
+    const result = (await compactWithRanges(runtime, [
+      { endMessageId: firstUser!.messageId!, startMessageId: firstUser!.messageId! },
+    ])) as { outcome: string };
+
+    expect(result.outcome).toBe("compacted");
+    expect(summaryPrompts).toHaveLength(1);
+    expect(summaryPrompts[0]).toContain("RANGE_HOOK_INSTRUCTION");
+    const events = await eventStore.getEvents(sessionId);
+    expect(events.filter((event) => event.type === SessionEventType.CompactBoundary)).toHaveLength(
+      1,
+    );
+  });
+
+  it("skips the whole ranges request when PreCompact blocks", async () => {
+    const sessionId = createSessionId("runtime-compact-hook-ranges-blocked");
+    const eventStore = createTestSessionEventStore();
+    const hookRunner = createInMemoryHookRunner({
+      hooks: [
+        {
+          event: HookEventName.PreCompact,
+          callback: async () => ({ continue: false, reason: "VETO_RANGES_COMPACT" }),
+        },
+      ],
+    });
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a ranges PreCompact block test agent." },
+      {
+        eventStore,
+        hookRunner,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText() {
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("first ranges blocked setup");
+    await runtime.executeTurn("second ranges blocked setup");
+    const entriesBefore = readRuntimeEntries(runtime);
+    const firstUser = entriesBefore.find(
+      (entry) =>
+        entry.kind !== "attachment" &&
+        entry.message.role === "user" &&
+        entry.messageId !== undefined,
+    );
+    const result = (await compactWithRanges(runtime, [
+      { endMessageId: firstUser!.messageId!, startMessageId: firstUser!.messageId! },
+    ])) as { displayText: string; entries: readonly RuntimeMessageEntry[]; outcome: string };
+
+    expect(result.outcome).toBe("skipped");
+    expect(result.displayText).toContain("VETO_RANGES_COMPACT");
+    expect(result.entries).toHaveLength(entriesBefore.length);
+    const events = await eventStore.getEvents(sessionId);
+    expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+  });
+
+  it("rejects a host summary when multiple ranges are requested", async () => {
+    const sessionId = createSessionId("runtime-compact-hook-ranges-host-summary");
+    const eventStore = createTestSessionEventStore();
+    let summaryCalls = 0;
+    const hookRunner = createInMemoryHookRunner({
+      hooks: [
+        {
+          event: HookEventName.PreCompact,
+          callback: async () => ({
+            hookSpecificOutput: {
+              compactionSummary: "HOST_PROVIDED_RANGES_SUMMARY",
+              hookEventName: HookEventName.PreCompact,
+            },
+          }),
+        },
+      ],
+    });
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a ranges host summary test agent." },
+      {
+        eventStore,
+        hookRunner,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                summaryCalls += 1;
+                return {
+                  finishReason: "stop",
+                  text: "<summary>should not be requested</summary>",
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                };
+              }
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("ranges host summary one");
+    await runtime.executeTurn("ranges host summary two");
+    await runtime.executeTurn("ranges host summary three");
+    await runtime.executeTurn("ranges host summary four");
+    const entries = readRuntimeEntries(runtime);
+    const userMessageIds = entries
+      .filter(
+        (entry) =>
+          entry.kind !== "attachment" &&
+          entry.message.role === "user" &&
+          entry.messageId !== undefined,
+      )
+      .map((entry) => entry.messageId!);
+    expect(userMessageIds.length).toBeGreaterThanOrEqual(3);
+
+    const result = (await compactWithRanges(runtime, [
+      { endMessageId: userMessageIds[0]!, startMessageId: userMessageIds[0]! },
+      { endMessageId: userMessageIds[2]!, startMessageId: userMessageIds[2]! },
+    ])) as { outcome: string };
+
+    expect(result.outcome).toBe("skipped");
+    expect(summaryCalls).toBe(0);
+    const events = await eventStore.getEvents(sessionId);
+    expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+  });
+
+  it("cold resume of a ranges compact equals the live chain message-for-message", async () => {
+    const sessionId = createSessionId("runtime-compact-ranges-cold-equivalence");
+    const eventStore = createTestSessionEventStore();
+    const store = createRecordingSessionStore();
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a ranges cold equivalence test agent." },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              return {
+                finishReason: "stop",
+                text: lastContent.includes("create a detailed summary")
+                  ? "<summary>range summary for cold equivalence.</summary>"
+                  : "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+        sessionStore: store,
+      },
+    );
+
+    await runtime.executeTurn("cold equivalence one");
+    await runtime.executeTurn("cold equivalence two");
+    await runtime.executeTurn("cold equivalence three");
+    await runtime.executeTurn("cold equivalence four");
+    const userIds = readRuntimeEntries(runtime)
+      .filter(
+        (entry) =>
+          entry.kind !== "attachment" &&
+          entry.message.role === "user" &&
+          entry.messageId !== undefined,
+      )
+      .map((entry) => entry.messageId!);
+    expect(userIds.length).toBeGreaterThanOrEqual(4);
+
+    const result = (await compactWithRanges(runtime, [
+      { endMessageId: userIds[0]!, startMessageId: userIds[0]! },
+      { endMessageId: userIds[2]!, startMessageId: userIds[2]! },
+    ])) as { entries: readonly RuntimeMessageEntry[]; outcome: string };
+    expect(result.outcome).toBe("compacted");
+
+    const liveIds = result.entries.flatMap((entry) =>
+      entry.kind === "attachment" || !entry.messageId ? [] : [entry.messageId],
+    );
+    const persisted = store.savedMessages.map((info) => ({
+      info,
+      parts: store.savedParts.filter((part) => part.messageID === info.id),
+    })) as unknown as MessageWithParts[];
+    const coldIds = activeSessionMessages(persisted, {}).map((message) => message.info.id);
+    // 提醒消息没有 runtime messageId；剔除后冷链必须与 live 链逐条一致。
+    expect(coldIds.filter((id) => liveIds.includes(id))).toEqual(liveIds);
+    // 未选中的 gap 轮保留；两个被折轮次的原文从活跃链消失（摘要补位）。
+    expect(coldIds).toContain(userIds[1]);
+    expect(coldIds).not.toContain(userIds[0]);
+    expect(coldIds).not.toContain(userIds[2]);
+  });
+
+  function readRuntimeEntries(runtime: ReturnType<typeof createTestAgentRuntime>) {
+    const internals = runtime as unknown as {
+      messageHistory: { borrowReadOnlyRuntimeEntries(): readonly RuntimeMessageEntry[] };
+    };
+    return internals.messageHistory.borrowReadOnlyRuntimeEntries();
+  }
+
+  function compactWithRanges(
+    runtime: ReturnType<typeof createTestAgentRuntime>,
+    ranges: Array<{
+      endMessageId: RuntimeMessageEntry["messageId"];
+      startMessageId: RuntimeMessageEntry["messageId"];
+    }>,
+  ): Promise<unknown> {
+    const internals = runtime as unknown as {
+      compactActiveConversation(
+        customInstructions: string | undefined,
+        traceContext: { traceId: string },
+        events: unknown[],
+        options: {
+          compactReason: CompactReason;
+          phase: CompactPhase;
+          ranges: readonly { endMessageId: string; startMessageId: string }[];
+          trigger: CompactTrigger;
+        },
+      ): Promise<unknown>;
+    };
+    return internals.compactActiveConversation(
+      undefined,
+      { traceId: "trace-compact-ranges-hooks" },
+      [],
+      {
+        compactReason: CompactReason.UserRequested,
+        phase: CompactPhase.StandaloneTurn,
+        ranges,
+        trigger: CompactTrigger.Manual,
+      },
+    );
+  }
+
+  it("injects PostCompact additionalContext into the next request", async () => {
+    const sessionId = createSessionId("runtime-compact-hook-post-reminder");
+    const eventStore = createTestSessionEventStore();
+    const turnContexts: Array<string> = [];
+    const hookRunner = createInMemoryHookRunner({
+      hooks: [
+        {
+          event: HookEventName.PostCompact,
+          callback: async () => ({
+            hookSpecificOutput: {
+              additionalContext: "POST_REMINDER",
+              hookEventName: HookEventName.PostCompact,
+            },
+          }),
+        },
+      ],
+    });
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a PostCompact reminder test agent." },
+      {
+        eventStore,
+        hookRunner,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                return {
+                  finishReason: "stop",
+                  text: "<summary>PostCompact reminder summary.</summary>",
+                  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+                };
+              }
+
+              turnContexts.push(
+                request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n"),
+              );
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("first post reminder setup");
+    await runtime.executeTurn("second post reminder setup");
+    const result = (await compactWithHooks(runtime)) as {
+      entries: ReadonlyArray<RuntimeMessageEntry>;
+      outcome: string;
+    };
+
+    expect(result.outcome).toBe("compacted");
+    const reminderEntry = result.entries.find(
+      (entry) => entry.kind === "attachment" && entry.metadata.source === "hook_context",
+    );
+    expect(reminderEntry?.content).toContain("POST_REMINDER");
+
+    await runtime.executeTurn("after post compact reminder");
+    expect(turnContexts.at(-1)).toContain("POST_REMINDER");
   });
 });
 
@@ -6268,3 +6923,1145 @@ function createRecordingSessionStore(
     },
   };
 }
+
+describe("compact commit cancellation and failure recovery", () => {
+  it("returns a queued CompactNow rejection to the next model step without persisting stale feedback", async () => {
+    const sessionId = createSessionId();
+    const store = createRecordingSessionStore();
+    const requests: string[] = [];
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        systemPrompt: "Keep the user's original constraints.",
+        compact: { enabled: false },
+      },
+      {
+        sessionStore: store,
+        eventStore: createTestSessionEventStore(),
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              requests.push(
+                request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n"),
+              );
+              if (requests.length === 1)
+                return {
+                  finishReason: "tool-calls",
+                  text: "",
+                  usage: { totalTokens: 2 },
+                  toolCalls: [
+                    {
+                      id: createToolCallId(),
+                      name: "CompactNow",
+                      input: {
+                        ranges: [
+                          {
+                            startMessageId: "missing-first",
+                            endMessageId: "missing-last",
+                            summary: "cannot apply",
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                };
+              return {
+                finishReason: "stop",
+                text: "Continue the user's work.",
+                usage: { totalTokens: 2 },
+              };
+            },
+          }),
+        ),
+      },
+    );
+    await runtime.executeTurn("keep the original user constraint");
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toContain("Unknown message id(s)");
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    expect(
+      internal.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .some((entry) => entry.metadata?.source === "compact_result"),
+    ).toBe(false);
+    expect(
+      store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+    ).toBe(false);
+    await runtime.executeTurn("next user turn");
+    expect(requests.at(-1)).not.toContain("Unknown message id(s)");
+  });
+
+  const modes = ["prefix", "ranges"] as const;
+  const oldRequest = "COMPACT_COMMIT_OLD_REQUEST";
+  const summaryMarker = "COMPACT_COMMIT_SUMMARY";
+
+  async function fixture(
+    afterSummary?: () => void,
+    firstMessage = oldRequest,
+    modelId = "default-runtime-model",
+    capabilities?: { continuationMcs: boolean; summaryMcs: boolean },
+  ) {
+    const sessionId = createSessionId();
+    const store = createRecordingSessionStore();
+    const eventStore = createTestSessionEventStore();
+    const requests: string[] = [];
+    let summaries = 0;
+    const modelFactory = createTestModelFactory(
+      withStreamTextFromGenerateText({
+        ...(capabilities
+          ? {
+              properties: ({ selection }: { selection: { modelId: string } }) => ({
+                supportsMidConversationSystem:
+                  selection.modelId === "summary-model"
+                    ? capabilities.summaryMcs
+                    : capabilities.continuationMcs,
+              }),
+            }
+          : {}),
+        async generateText(request: ModelRequest) {
+          if (
+            providerContentToText(request.messages.at(-1)?.content).includes(
+              "create a detailed summary",
+            )
+          ) {
+            summaries += 1;
+            afterSummary?.();
+            return {
+              text: `<summary>${summaryMarker}</summary>`,
+              finishReason: "stop",
+              usage: { totalTokens: 2 },
+            };
+          }
+          requests.push(
+            request.messages.map((message) => providerContentToText(message.content)).join("\n"),
+          );
+          return { text: "normal response", finishReason: "stop", usage: { totalTokens: 2 } };
+        },
+      }),
+    );
+    const config = {
+      modelSelection: createTestModelSelection(`test/${modelId}`),
+      ...(capabilities
+        ? { compactSummaryModel: createTestModelSelection("test/summary-model") }
+        : {}),
+      compact: { enabled: false },
+      systemPrompt: "Commit recovery test agent.",
+      workingDirectory: process.cwd(),
+    };
+    const createRuntime = () =>
+      createTestAgentRuntime(sessionId, config, { eventStore, modelFactory, sessionStore: store });
+    const runtime = createRuntime();
+    for (const input of [
+      firstMessage,
+      "second compact commit request",
+      "third compact commit request",
+    ]) {
+      await runtime.executeTurn(input);
+    }
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    const firstUserId = internal.messageHistory
+      .borrowReadOnlyRuntimeEntries()
+      .find(
+        (entry) => entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+      )!.messageId!;
+    const invoke = (mode: (typeof modes)[number], abortSignal?: AbortSignal, required = false) =>
+      internal.compactActiveConversation(undefined, createRootTraceContext({ sessionId }), [], {
+        abortSignal,
+        ...(required ? { autoCompactThreshold: 1 } : {}),
+        trigger: CompactTrigger.Auto,
+        phase: CompactPhase.MidTurn,
+        ...(mode === "ranges"
+          ? { ranges: [{ startMessageId: firstUserId, endMessageId: firstUserId }] }
+          : {}),
+      });
+    return {
+      createRuntime,
+      eventStore,
+      internal,
+      invoke,
+      requests,
+      runtime,
+      sessionId,
+      store,
+      summaryCount: () => summaries,
+    };
+  }
+
+  function liveText(internal: AgentRuntimeInternal): string {
+    return internal.messageHistory
+      .borrowReadOnlyRuntimeEntries()
+      .map((entry) =>
+        entry.kind === "attachment" ? entry.content : providerContentToText(entry.message.content),
+      )
+      .join("\n");
+  }
+
+  /** 读取 replaceMessages 入参文本，仅用于按住摘要条目注入应用失败，避免误伤 microcompact/context-refresh。 */
+  function runtimeEntriesText(entries: readonly unknown[]): string {
+    return entries
+      .map((entry) => {
+        const runtimeEntry = entry as RuntimeMessageEntry;
+        return runtimeEntry.kind === "attachment"
+          ? runtimeEntry.content
+          : providerContentToText((entry as { message: { content: unknown } }).message.content);
+      })
+      .join("\n");
+  }
+
+  it("applies a model-written summary without another model call and survives cold recovery", async () => {
+    const test = await fixture(undefined, oldRequest.repeat(1000));
+    const entries = test.internal.messageHistory.borrowReadOnlyRuntimeEntries();
+    const id = entries.find(
+      (entry) => entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+    )!.messageId!;
+    const result = await test.internal.compactActiveConversation(
+      undefined,
+      createRootTraceContext({ sessionId: test.sessionId }),
+      [],
+      {
+        trigger: CompactTrigger.Auto,
+        ranges: [
+          { startMessageId: id, endMessageId: id, summary: "DIRECT_SUMMARY_KEEP_CONSTRAINT" },
+        ],
+      },
+    );
+    expect(result.outcome).toBe("compacted");
+    expect(test.summaryCount()).toBe(0);
+    expect(liveText(test.internal)).toContain("DIRECT_SUMMARY_KEEP_CONSTRAINT");
+    expect(liveText(test.internal)).not.toContain(oldRequest);
+    const resumed = test.createRuntime();
+    await resumed.resumeFromStore();
+    await resumed.executeTurn("continue after direct summary");
+    expect(test.requests.at(-1)).toContain("DIRECT_SUMMARY_KEEP_CONSTRAINT");
+    expect(test.requests.at(-1)).not.toContain(oldRequest);
+  });
+
+  it("does not commit a submitted summary when reminders make the final context larger", async () => {
+    const test = await fixture();
+    const before = liveText(test.internal);
+    const id = test.internal.messageHistory
+      .borrowReadOnlyRuntimeEntries()
+      .find(
+        (entry) => entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+      )!.messageId!;
+    const result = await test.internal.compactActiveConversation(
+      undefined,
+      createRootTraceContext({ sessionId: test.sessionId }),
+      [],
+      {
+        trigger: CompactTrigger.Auto,
+        ranges: [
+          { startMessageId: id, endMessageId: id, summary: "oversized summary ".repeat(1000) },
+        ],
+      },
+    );
+    expect(result.outcome).toBe("skipped");
+    expect(liveText(test.internal)).toBe(before);
+    expect(test.summaryCount()).toBe(0);
+    expect(
+      test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+    ).toBe(false);
+  });
+
+  it("does not ignore new PreCompact instructions when the model has already written its summary", async () => {
+    const test = await fixture(undefined, oldRequest.repeat(1000));
+    const before = liveText(test.internal);
+    vi.spyOn(test.internal, "runPreCompactHooks").mockResolvedValue({
+      additionalContexts: ["Preserve the newly required exact error"],
+      blockRequested: false,
+    } as never);
+    const id = test.internal.messageHistory
+      .borrowReadOnlyRuntimeEntries()
+      .find(
+        (entry) => entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+      )!.messageId!;
+    const result = await test.internal.compactActiveConversation(
+      undefined,
+      createRootTraceContext({ sessionId: test.sessionId }),
+      [],
+      {
+        ranges: [{ startMessageId: id, endMessageId: id, summary: "already written" }],
+      },
+    );
+    expect(result.outcome).toBe("skipped");
+    expect(result.displayText).toContain("Preserve the newly required exact error");
+    expect(liveText(test.internal)).toBe(before);
+    expect(test.summaryCount()).toBe(0);
+  });
+
+  for (const mode of modes) {
+    for (const continuationMcs of [false, true]) {
+      it(`${mode}: estimates the continuing model window when the summary model has opposite MCS support (${continuationMcs})`, async () => {
+        const test = await fixture(undefined, oldRequest.repeat(1000), "deepseek-v4.1-flash", {
+          continuationMcs,
+          summaryMcs: !continuationMcs,
+        });
+        const before = test.internal.messageHistory.borrowReadOnlyRuntimeEntries();
+        const expectedPre = estimateRuntimeEntryTokens(before, {
+          useMidConversationSystem: continuationMcs,
+        });
+        const result = await test.invoke(mode);
+        expect(result.outcome).toBe("compacted");
+        const part = test.store.savedParts.find(
+          (part) => part.type === "compaction" && part.compactBoundary,
+        );
+        if (!part || part.type !== "compaction") throw new Error("missing compact boundary");
+        expect(part.compactBoundary!.preCompactTokenCount).toBe(expectedPre);
+        const after = test.internal.messageHistory.borrowReadOnlyRuntimeEntries();
+        const expectedPost = estimateRuntimeEntryTokens(after, {
+          useMidConversationSystem: continuationMcs,
+        });
+        expect(part.compactBoundary!.truePostCompactTokenCount).toBe(expectedPost);
+        expect(result.tokenCount).toBe(expectedPost);
+        expect(
+          estimateRuntimeEntryTokens(after, { useMidConversationSystem: !continuationMcs }),
+        ).not.toBe(expectedPost);
+      });
+    }
+    for (const shrinking of [false, true]) {
+      it(`${mode}: hook summaries emit no fictitious compact model events (shrinking=${shrinking})`, async () => {
+        const test = await fixture(
+          undefined,
+          shrinking ? oldRequest.repeat(1000) : oldRequest,
+          "deepseek-v4.1-flash",
+        );
+        vi.spyOn(test.internal, "runPreCompactHooks").mockResolvedValue({
+          additionalContexts: [],
+          blockRequested: false,
+          compactionSummary: "HOST_SUMMARY",
+        } as never);
+        const start = (await test.eventStore.getEvents(test.sessionId)).length;
+        const result = await test.invoke(mode);
+        expect(result.outcome).toBe(shrinking ? "compacted" : "skipped");
+        expect(test.summaryCount()).toBe(0);
+        expect(
+          (await test.eventStore.getEvents(test.sessionId))
+            .slice(start)
+            .filter(
+              (event) =>
+                (event.type === SessionEventType.ModelRequest ||
+                  event.type === SessionEventType.ModelComplete) &&
+                (event.payload as { querySource?: string }).querySource === "compact",
+            ),
+        ).toEqual([]);
+      });
+    }
+    it(`${mode}: summary recovery guidance respects an empty continuation tool scope`, async () => {
+      const test = await fixture(undefined, oldRequest.repeat(1000));
+      const id = test.internal.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .find(
+          (entry) =>
+            entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId,
+        )!.messageId!;
+      const result = await test.internal.compactActiveConversation(
+        undefined,
+        createRootTraceContext({ sessionId: test.sessionId }),
+        [],
+        {
+          getContinuationTools: () => [],
+          ...(mode === "ranges" ? { ranges: [{ startMessageId: id, endMessageId: id }] } : {}),
+        },
+      );
+      expect(result.outcome).toBe("compacted");
+      expect(liveText(test.internal)).not.toContain("SearchContext");
+      expect(liveText(test.internal)).not.toContain("DecompressContext");
+    });
+    it(`${mode}: records the post-fold context estimate separately from summary request usage`, async () => {
+      const test = await fixture();
+      const result = await test.invoke(mode);
+      expect(result.outcome).toBe("compacted");
+      const part = test.store.savedParts.find(
+        (part) => part.type === "compaction" && part.compactBoundary,
+      );
+      if (!part || part.type !== "compaction") throw new Error("missing compact boundary");
+      const boundary = part.compactBoundary!;
+      expect(boundary.postCompactTokenCount).toBe(boundary.truePostCompactTokenCount);
+      expect(result.tokenCount).toBe(boundary.truePostCompactTokenCount);
+      expect(boundary.postCompactTokenCount).not.toBe(2);
+    });
+
+    for (const modelId of ["deepseek-v4.1-flash", "deepseek-flash"]) {
+      it(`${mode}: ${modelId} leaves history unchanged when an independent summary cannot shrink it`, async () => {
+        const test = await fixture(undefined, oldRequest, modelId);
+        const before = liveText(test.internal);
+        const result = await test.invoke(mode);
+        expect(result.outcome).toBe("skipped");
+        expect(result.displayText).toContain("do not reduce context");
+        expect(liveText(test.internal)).toBe(before);
+        expect(test.summaryCount()).toBe(1);
+        expect(
+          test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+        ).toBe(false);
+      });
+    }
+
+    it(`${mode}: Flash stops required compaction instead of retrying a non-shrinking summary`, async () => {
+      const test = await fixture(undefined, oldRequest, "deepseek-v4.1-flash");
+      const before = liveText(test.internal);
+      await expect(test.invoke(mode, undefined, true)).rejects.toMatchObject({
+        type: CoreErrorType.ModelContextExceeded,
+        retryable: false,
+      });
+      expect(liveText(test.internal)).toBe(before);
+      expect(test.summaryCount()).toBe(1);
+      expect(
+        test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+      ).toBe(false);
+    });
+
+    it(`${mode}: Flash still commits an independent summary that releases context`, async () => {
+      const test = await fixture(undefined, oldRequest.repeat(1000), "deepseek-v4.1-flash");
+      const result = await test.invoke(mode, undefined, true);
+      expect(result.outcome).toBe("compacted");
+      expect(liveText(test.internal)).toContain(summaryMarker);
+      expect(liveText(test.internal)).not.toContain(oldRequest);
+      expect(test.summaryCount()).toBe(1);
+    });
+
+    it(`${mode}: rejects cancellation after the summary returns without changing history`, async () => {
+      const abort = new AbortController();
+      const test = await fixture(() => abort.abort(new Error("cancel before compact commit")));
+      const before = liveText(test.internal);
+
+      await expect(test.invoke(mode, abort.signal)).rejects.toThrow();
+
+      expect(liveText(test.internal)).toBe(before);
+      expect(
+        test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+      ).toBe(false);
+    });
+
+    it(`${mode}: checks cancellation again after the last precommit event await`, async () => {
+      const abort = new AbortController();
+      const test = await fixture();
+      const before = liveText(test.internal);
+      const append = test.eventStore.append.bind(test.eventStore);
+      vi.spyOn(test.eventStore, "append").mockImplementation(async (event) => {
+        const saved = await append(event);
+        if (
+          event.type === SessionEventType.ModelComplete &&
+          (event.payload as { querySource?: string }).querySource === "compact"
+        ) {
+          abort.abort(new Error("cancel after summary event"));
+        }
+        return saved;
+      });
+
+      await expect(test.invoke(mode, abort.signal)).rejects.toThrow();
+
+      expect(liveText(test.internal)).toBe(before);
+      expect(
+        test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+      ).toBe(false);
+    });
+
+    it(`${mode}: retains committed state if cancellation arrives during bundle persistence`, async () => {
+      const abort = new AbortController();
+      const test = await fixture();
+      test.store.commitMessageBundle = async (input) => {
+        for (const record of input.messages) {
+          await test.store.saveMessage(record.info);
+          for (const part of record.parts) await test.store.savePart(part);
+        }
+        abort.abort(new Error("cancel after bundle committed"));
+      };
+
+      const result = await test.invoke(mode, abort.signal);
+
+      expect(result.outcome).toBe("compacted");
+      expect(liveText(test.internal)).toContain(summaryMarker);
+      expect(liveText(test.internal)).not.toContain(oldRequest);
+      expect(
+        test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+      ).toBe(true);
+      expect(test.summaryCount()).toBe(1);
+    });
+
+    it(`${mode}: keeps the original history when bundle persistence fails`, async () => {
+      const test = await fixture();
+      const before = liveText(test.internal);
+      const savePart = test.store.savePart.bind(test.store);
+      vi.spyOn(test.store, "savePart").mockImplementation(async (part) => {
+        if (part.type === "compaction" && part.compactBoundary)
+          throw new Error("bundle persistence rejected");
+        await savePart(part);
+      });
+
+      await expect(test.invoke(mode)).rejects.toThrow("bundle persistence rejected");
+
+      expect(liveText(test.internal)).toBe(before);
+      expect(
+        test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+      ).toBe(false);
+    });
+
+    for (const failurePoint of [
+      "boundary_event",
+      "completion_timeline",
+      "completion_event",
+      "post_compact_hook",
+    ] as const) {
+      it(`${mode}: converges live and resumed state after ${failurePoint} fails, without retrying committed compaction`, async () => {
+        const test = await fixture();
+        const failure = new Error(`forced ${failurePoint} failure`);
+        let failOnce = true;
+        if (failurePoint === "completion_timeline") {
+          const persist = test.internal.persistCompactTimeline.bind(test.internal);
+          vi.spyOn(test.internal, "persistCompactTimeline").mockImplementation(
+            async (payload, trace) => {
+              if (failOnce && payload.status === CompactTimelineStatus.Completed) {
+                failOnce = false;
+                throw failure;
+              }
+              await persist(payload, trace);
+            },
+          );
+        } else if (failurePoint === "post_compact_hook") {
+          vi.spyOn(test.internal, "runPostCompactHooks").mockImplementationOnce(async () => {
+            expect(liveText(test.internal)).toContain(summaryMarker);
+            expect(
+              test.store.savedParts.some(
+                (part) => part.type === "compaction" && part.compactBoundary,
+              ),
+            ).toBe(true);
+            throw failure;
+          });
+        } else {
+          const append = test.eventStore.append.bind(test.eventStore);
+          const target =
+            failurePoint === "boundary_event"
+              ? SessionEventType.CompactBoundary
+              : SessionEventType.CompactCompleted;
+          vi.spyOn(test.eventStore, "append").mockImplementation(async (event) => {
+            if (failOnce && event.type === target) {
+              failOnce = false;
+              throw failure;
+            }
+            return append(event);
+          });
+        }
+        test.internal.readFileState.set("stale-before-compact", {
+          path: "stale-before-compact",
+          content: "stale",
+          readAt: new Date(),
+          isPartialView: false,
+        });
+
+        await expect(test.invoke(mode)).rejects.toBe(failure);
+
+        expect(test.summaryCount()).toBe(1);
+        expect(liveText(test.internal)).toContain(summaryMarker);
+        expect(liveText(test.internal)).not.toContain(oldRequest);
+        expect(test.internal.readFileState.size).toBe(0);
+        expect(test.internal.lastCompactNudgeTokenCount).toBeGreaterThan(0);
+        const boundaryParts = test.store.savedParts.filter(
+          (part) => part.type === "compaction" && part.compactBoundary,
+        );
+        expect(boundaryParts).toHaveLength(1);
+        expect(test.internal.latestConversationMessageId).toBe(boundaryParts[0]?.messageID);
+        expect(
+          test.store.savedParts.some(
+            (part) =>
+              part.type === "compaction" &&
+              (part.timelineStatus === CompactTimelineStatus.Failed ||
+                part.timelineStatus === CompactTimelineStatus.Interrupted),
+          ),
+        ).toBe(false);
+
+        await test.runtime.executeTurn("continue after committed failure");
+        expect(test.requests.at(-1)).toContain(summaryMarker);
+        expect(test.requests.at(-1)).not.toContain(oldRequest);
+        const resumed = test.createRuntime();
+        await resumed.resumeFromStore();
+        await resumed.executeTurn("continue after cold recovery");
+        expect(test.requests.at(-1)).toContain(summaryMarker);
+        expect(test.requests.at(-1)).not.toContain(oldRequest);
+        expect(test.summaryCount()).toBe(1);
+        expect(
+          test.store.savedParts.some(
+            (part) =>
+              part.type === "compaction" && part.timelineStatus === CompactTimelineStatus.Completed,
+          ),
+        ).toBe(true);
+      });
+    }
+
+    it(`${mode}: replays deferred committed state before the next request when applying the summary fails once`, async () => {
+      const test = await fixture();
+      const failure = new Error("forced committed apply failure");
+      const replace = test.internal.messageHistory.replaceMessages.bind(
+        test.internal.messageHistory,
+      );
+      let failOnce = true;
+      vi.spyOn(test.internal.messageHistory, "replaceMessages").mockImplementation((messages) => {
+        if (failOnce && runtimeEntriesText(messages).includes(summaryMarker)) {
+          failOnce = false;
+          throw failure;
+        }
+        replace(messages);
+      });
+
+      await expect(test.invoke(mode)).rejects.toBe(failure);
+      // 摘要已落盘但活跃历史仍是旧的：恢复点必须在下一轮请求前收敛。
+      expect(test.summaryCount()).toBe(1);
+      expect(liveText(test.internal)).toContain(oldRequest);
+      expect(
+        test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+      ).toBe(true);
+
+      await test.runtime.executeTurn("continue after deferred committed apply");
+
+      expect(test.requests.at(-1)).toContain(summaryMarker);
+      expect(test.requests.at(-1)).not.toContain(oldRequest);
+      expect(liveText(test.internal)).toContain(summaryMarker);
+      expect(liveText(test.internal)).not.toContain(oldRequest);
+      expect(test.summaryCount()).toBe(1);
+      expect(
+        test.store.savedParts.some(
+          (part) =>
+            part.type === "compaction" &&
+            (part.timelineStatus === CompactTimelineStatus.Failed ||
+              part.timelineStatus === CompactTimelineStatus.Interrupted),
+        ),
+      ).toBe(false);
+    });
+
+    it(`${mode}: fails closed when the deferred committed state cannot be replayed on the next turn`, async () => {
+      const test = await fixture();
+      const failure = new Error("forced persistent committed apply failure");
+      const replace = test.internal.messageHistory.replaceMessages.bind(
+        test.internal.messageHistory,
+      );
+      const spy = vi
+        .spyOn(test.internal.messageHistory, "replaceMessages")
+        .mockImplementation((messages) => {
+          if (runtimeEntriesText(messages).includes(summaryMarker)) throw failure;
+          replace(messages);
+        });
+
+      await expect(test.invoke(mode)).rejects.toBe(failure);
+      const requestsBefore = test.requests.length;
+
+      await expect(
+        test.runtime.executeTurn("continue while committed apply keeps failing"),
+      ).rejects.toMatchObject({ type: CoreErrorType.InvalidStateTransition });
+
+      // fail-closed：本轮不向模型发出任何带有旧历史的请求。
+      expect(test.requests.length).toBe(requestsBefore);
+      expect(liveText(test.internal)).toContain(oldRequest);
+      expect(test.summaryCount()).toBe(1);
+
+      spy.mockRestore();
+      await test.runtime.executeTurn("continue after committed apply succeeds");
+
+      expect(test.requests.at(-1)).toContain(summaryMarker);
+      expect(test.requests.at(-1)).not.toContain(oldRequest);
+      expect(liveText(test.internal)).toContain(summaryMarker);
+      expect(liveText(test.internal)).not.toContain(oldRequest);
+    });
+  }
+
+  it.each(["task-notification", "subagent-message"] as const)(
+    "%s survives recovery before it is added to the live history",
+    async (mode) => {
+      const test = await fixture();
+      const replace = vi
+        .spyOn(test.internal.messageHistory, "replaceMessages")
+        .mockImplementationOnce(() => {
+          throw new Error("forced committed apply failure");
+        });
+      await expect(test.invoke("ranges")).rejects.toThrow("forced committed apply failure");
+      replace.mockRestore();
+      const text = `new ${mode} after compact`;
+      const base = {
+        id: createRuntimeCommandId(),
+        priority: "next" as const,
+        createdAt: new Date(),
+        branchGeneration: test.internal.branchGeneration,
+        traceContext: createRootTraceContext({ sessionId: test.sessionId }),
+        text,
+      };
+      test.internal.runtimeCommandQueue.enqueue(
+        mode === "task-notification"
+          ? { ...base, mode, source: "background_task" }
+          : {
+              ...base,
+              mode,
+              source: "subagent_message",
+              agentId: "child",
+              agentType: "general",
+              responseId: "reply",
+              childSessionId: "child-session",
+              childToolCallId: "child-call",
+              summary: "reply",
+              messageLength: text.length,
+            },
+      );
+      await test.internal.drainRuntimeCommandQueue();
+      expect(test.requests.at(-1)).toContain(summaryMarker);
+      expect(test.requests.at(-1)).toContain(text);
+      expect(liveText(test.internal)).toContain(text);
+    },
+  );
+
+  it("recovers before admitting a control-only user message", async () => {
+    const test = await fixture();
+    const replace = vi
+      .spyOn(test.internal.messageHistory, "replaceMessages")
+      .mockImplementationOnce(() => {
+        throw new Error("forced committed apply failure");
+      });
+    await expect(test.invoke("ranges")).rejects.toThrow("forced committed apply failure");
+    replace.mockRestore();
+    const persistMessage = vi.fn(async () => {});
+    await emitControlOnlyUserTurn.call(test.internal, {
+      messageId: createMessageId(),
+      titleInput: "new goal",
+      historyText: "new goal",
+      turnInput: "new goal",
+      traceContext: createRootTraceContext({ sessionId: test.sessionId }),
+      persistMessage,
+    });
+    expect(persistMessage).toHaveBeenCalledOnce();
+    expect(liveText(test.internal)).toContain(summaryMarker);
+    expect(liveText(test.internal)).toContain("new goal");
+    await test.runtime.executeTurn("continue after control-only turn");
+    expect(test.requests.at(-1)).toContain("new goal");
+    expect(test.requests.at(-1)).toContain(summaryMarker);
+  });
+
+  it.each(["task-notification", "subagent-message"] as const)(
+    "%s stays queued and reports a persistent replay failure",
+    async (mode) => {
+      const test = await fixture();
+      const replace = vi
+        .spyOn(test.internal.messageHistory, "replaceMessages")
+        .mockImplementation(() => {
+          throw new Error("persistent committed apply failure");
+        });
+      await expect(test.invoke("ranges")).rejects.toThrow("persistent committed apply failure");
+      const text = `queued ${mode} after failure`;
+      const base = {
+        id: createRuntimeCommandId(),
+        priority: "next" as const,
+        createdAt: new Date(),
+        branchGeneration: test.internal.branchGeneration,
+        traceContext: createRootTraceContext({ sessionId: test.sessionId }),
+        text,
+      };
+      const command =
+        mode === "task-notification"
+          ? { ...base, mode, source: "background_task" as const }
+          : {
+              ...base,
+              mode,
+              source: "subagent_message" as const,
+              agentId: "child",
+              agentType: "general",
+              responseId: "reply",
+              childSessionId: "child-session",
+              childToolCallId: "child-call",
+              summary: "reply",
+              messageLength: text.length,
+            };
+      test.internal.runtimeCommandQueue.enqueue(command);
+      const before = test.requests.length;
+      await test.internal.drainRuntimeCommandQueue();
+      expect(test.requests).toHaveLength(before);
+      expect(test.internal.runtimeCommandQueue.snapshot()).toContain(command);
+      const errors = (await test.eventStore.getEvents(test.sessionId)).filter(
+        (event) => event.type === SessionEventType.TurnError,
+      );
+      expect(errors).toHaveLength(1);
+      expect(JSON.stringify(errors[0]?.payload)).toContain("persistent committed apply failure");
+      replace.mockRestore();
+      await test.internal.drainRuntimeCommandQueue();
+      expect(test.internal.runtimeCommandQueue.snapshot()).not.toContain(command);
+      expect(test.requests.at(-1)).toContain(text);
+      expect(test.requests.at(-1)).toContain(summaryMarker);
+    },
+  );
+
+  it.each(["task-notification", "subagent-message"] as const)(
+    "%s reports a failure that escapes before the turn can report it",
+    async (mode) => {
+      const test = await fixture();
+      vi.spyOn(test.internal, "executeTurnCommand").mockRejectedValueOnce(
+        new Error("unreported command failure"),
+      );
+      const text = `failed ${mode}`;
+      const base = {
+        id: createRuntimeCommandId(),
+        priority: "next" as const,
+        createdAt: new Date(),
+        branchGeneration: test.internal.branchGeneration,
+        traceContext: createRootTraceContext({ sessionId: test.sessionId }),
+        text,
+      };
+      test.internal.runtimeCommandQueue.enqueue(
+        mode === "task-notification"
+          ? { ...base, mode, source: "background_task" }
+          : {
+              ...base,
+              mode,
+              source: "subagent_message",
+              agentId: "child",
+              agentType: "general",
+              responseId: "reply",
+              childSessionId: "child-session",
+              childToolCallId: "child-call",
+              summary: "reply",
+              messageLength: text.length,
+            },
+      );
+      await test.internal.drainRuntimeCommandQueue();
+      const errors = (await test.eventStore.getEvents(test.sessionId)).filter(
+        (event) => event.type === SessionEventType.TurnError,
+      );
+      expect(errors).toHaveLength(1);
+      expect(JSON.stringify(errors[0]?.payload)).toContain("unreported command failure");
+    },
+  );
+
+  it("does not publish a second error when the background turn already reported it", async () => {
+    const test = await fixture();
+    const traceContext = createRootTraceContext({ sessionId: test.sessionId });
+    const failure = createTurnFailureError(
+      new Error("reported once"),
+      undefined,
+      "Turn execution failed",
+    );
+    vi.spyOn(test.internal, "executeTurnCommand").mockImplementationOnce(async () => {
+      await appendTurnOutcomeEvent(test.internal, {
+        coreError: failure,
+        events: [],
+        durationMs: 0,
+        turnPhase: "model",
+        traceContext,
+        fallbackMessage: "Turn execution failed",
+        logEvent: "test.failed",
+        logLabel: "Test",
+      });
+      throw failure;
+    });
+    test.internal.runtimeCommandQueue.enqueue({
+      id: createRuntimeCommandId(),
+      priority: "next",
+      createdAt: new Date(),
+      branchGeneration: test.internal.branchGeneration,
+      traceContext,
+      mode: "task-notification",
+      source: "background_task",
+      text: "result",
+    });
+    await test.internal.drainRuntimeCommandQueue();
+    const errors = (await test.eventStore.getEvents(test.sessionId)).filter(
+      (event) => event.type === SessionEventType.TurnError,
+    );
+    expect(errors).toHaveLength(1);
+  });
+
+  it("propagates reactive compact failures before commit and retains the original history", async () => {
+    const test = await fixture();
+    test.internal.config.compact = { enabled: true };
+    const failure = new Error("reactive pre-commit storage failure");
+    vi.spyOn(test.internal, "compactActiveConversation").mockRejectedValueOnce(failure);
+    const entries = test.internal.messageHistory.borrowReadOnlyRuntimeEntries();
+    const before = liveText(test.internal);
+    const model = createTestRuntimeModel({
+      contextWindow: 240,
+      generateText: async () => ({ finishReason: "stop", text: "" }),
+    });
+    await expect(
+      test.internal.reactiveCompactAfterContextExceeded(
+        createContextExceededError(),
+        createRootTraceContext({ sessionId: test.sessionId }),
+        [],
+        undefined,
+        {
+          activeEntries: entries,
+          model,
+          modelStepIndex: 1,
+          rapidRefillCount: 0,
+          turnRequestState: { entries, outputTokenContinuationCount: 0 },
+        },
+      ),
+    ).rejects.toBe(failure);
+    expect(liveText(test.internal)).toBe(before);
+    expect(test.internal.pendingCommittedCompactApply).toBeUndefined();
+  });
+
+  it("propagates reactive compact failures after commit and recovers before the next turn", async () => {
+    const test = await fixture();
+    test.internal.config.compact = { enabled: true };
+    const failure = new Error("reactive compact boundary failed");
+    const append = test.eventStore.append.bind(test.eventStore);
+    vi.spyOn(test.eventStore, "append").mockImplementation(async (event) => {
+      if (event.type === SessionEventType.CompactBoundary) throw failure;
+      return append(event);
+    });
+    const entries = test.internal.messageHistory.borrowReadOnlyRuntimeEntries();
+    const model = createTestRuntimeModel({
+      contextWindow: 240,
+      generateText: async () => ({
+        finishReason: "stop",
+        text: `<summary>${summaryMarker}</summary>`,
+      }),
+    });
+    await expect(
+      test.internal.reactiveCompactAfterContextExceeded(
+        createContextExceededError(),
+        createRootTraceContext({ sessionId: test.sessionId }),
+        [],
+        undefined,
+        {
+          activeEntries: entries,
+          model,
+          modelStepIndex: 1,
+          rapidRefillCount: 0,
+          turnRequestState: { entries, outputTokenContinuationCount: 0 },
+        },
+      ),
+    ).rejects.toBe(failure);
+    expect(test.internal.pendingCommittedCompactApply).toBeDefined();
+    await test.runtime.executeTurn("continue after reactive compact failure");
+    expect(test.requests.at(-1)).toContain(summaryMarker);
+    expect(test.requests.at(-1)).not.toContain(oldRequest);
+  });
+
+  it("reports committed auto compact apply failure and recovers before the next turn", async () => {
+    const sessionId = createSessionId("runtime-auto-compact-apply-recovery");
+    const eventStore = createTestSessionEventStore();
+    const requests: string[] = [];
+    const longPrompt = "old context ".repeat(80);
+    const summaryMarker = "AUTO_COMPACT_APPLY_SUMMARY";
+    let summaries = 0;
+    let normalResponseCount = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        compact: {
+          bufferTokens: 10,
+          contextWindow: 120,
+          summaryReserveTokens: 0,
+        },
+        maxOutputTokens: 1,
+        systemPrompt: "You are an auto compact recovery test agent.",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              requests.push(
+                request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n"),
+              );
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                summaries += 1;
+                return {
+                  finishReason: "stop",
+                  text: `<summary>${summaryMarker}</summary>`,
+                  usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+                };
+              }
+              normalResponseCount++;
+              return {
+                finishReason: "stop",
+                text: `normal response ${normalResponseCount}`,
+                usage: {
+                  inputTokens: normalResponseCount === 2 ? 115 : 3,
+                  outputTokens: 1,
+                  totalTokens: normalResponseCount === 2 ? 116 : 4,
+                },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    const failure = new Error("forced committed apply failure");
+    const replace = internal.messageHistory.replaceMessages.bind(internal.messageHistory);
+    let failOnce = true;
+    vi.spyOn(internal.messageHistory, "replaceMessages").mockImplementation((messages) => {
+      if (failOnce && runtimeEntriesText(messages).includes(summaryMarker)) {
+        failOnce = false;
+        throw failure;
+      }
+      replace(messages);
+    });
+
+    await runtime.executeTurn("auto compact warmup setup");
+    await runtime.executeTurn(longPrompt);
+    await expect(
+      runtime.executeTurn("continue with enough context to trigger auto compact"),
+    ).rejects.toMatchObject({ cause: failure });
+    expect(internal.pendingCommittedCompactApply).toBeDefined();
+    expect(normalResponseCount).toBe(2);
+    await runtime.executeTurn("retry after failed automatic compaction");
+    expect(summaries).toBe(1);
+    expect(requests.at(-1)).toContain(summaryMarker);
+    expect(requests.at(-1)).not.toContain(longPrompt);
+    expect(liveText(internal)).toContain(summaryMarker);
+    expect(liveText(internal)).not.toContain(longPrompt);
+  });
+
+  it("reports committed auto compact event failure and recovers before the next turn", async () => {
+    const sessionId = createSessionId("runtime-auto-compact-post-commit-recovery");
+    const eventStore = createTestSessionEventStore();
+    const requests: string[] = [];
+    const longPrompt = "old context ".repeat(80);
+    const summaryMarker = "AUTO_COMPACT_POST_COMMIT_SUMMARY";
+    let summaries = 0;
+    let normalResponseCount = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        compact: {
+          bufferTokens: 10,
+          contextWindow: 120,
+          summaryReserveTokens: 0,
+        },
+        maxOutputTokens: 1,
+        systemPrompt: "You are an auto compact post-commit recovery test agent.",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            async generateText(request) {
+              requests.push(
+                request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n"),
+              );
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                summaries += 1;
+                return {
+                  finishReason: "stop",
+                  text: `<summary>${summaryMarker}</summary>`,
+                  usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+                };
+              }
+              normalResponseCount++;
+              return {
+                finishReason: "stop",
+                text: `normal response ${normalResponseCount}`,
+                usage: {
+                  inputTokens: normalResponseCount === 2 ? 115 : 3,
+                  outputTokens: 1,
+                  totalTokens: normalResponseCount === 2 ? 116 : 4,
+                },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+    const internal = runtime as unknown as AgentRuntimeInternal;
+    const failure = new Error("forced post-commit boundary event failure");
+    const append = eventStore.append.bind(eventStore);
+    let failOnce = true;
+    vi.spyOn(eventStore, "append").mockImplementation(async (event) => {
+      if (failOnce && event.type === SessionEventType.CompactBoundary) {
+        failOnce = false;
+        throw failure;
+      }
+      return append(event);
+    });
+
+    await runtime.executeTurn("auto compact warmup setup");
+    await runtime.executeTurn(longPrompt);
+    await expect(
+      runtime.executeTurn("continue with enough context to trigger auto compact"),
+    ).rejects.toMatchObject({ cause: failure });
+    expect(internal.pendingCommittedCompactApply).toBeDefined();
+    expect(normalResponseCount).toBe(2);
+    await runtime.executeTurn("retry after failed automatic compaction");
+    expect(summaries).toBe(1);
+    expect(requests.at(-1)).toContain(summaryMarker);
+    expect(requests.at(-1)).not.toContain(longPrompt);
+    expect(liveText(internal)).toContain(summaryMarker);
+    expect(liveText(internal)).not.toContain(longPrompt);
+  });
+
+  it("ranges: stops scheduling later batches when cancellation arrives in the first summary batch", async () => {
+    const abort = new AbortController();
+    const test = await fixture(() => abort.abort(new Error("cancel first range batch")));
+    const before = liveText(test.internal);
+    const ranges = test.internal.messageHistory
+      .borrowReadOnlyRuntimeEntries()
+      .flatMap((entry) =>
+        entry.kind !== "attachment" && entry.message.role === "user" && entry.messageId
+          ? [{ startMessageId: entry.messageId, endMessageId: entry.messageId }]
+          : [],
+      );
+    expect(ranges).toHaveLength(3);
+
+    await expect(
+      test.internal.compactActiveConversation(
+        undefined,
+        createRootTraceContext({ sessionId: test.sessionId }),
+        [],
+        {
+          abortSignal: abort.signal,
+          ranges,
+          trigger: CompactTrigger.Auto,
+        },
+      ),
+    ).rejects.toThrow();
+
+    expect(test.summaryCount()).toBe(2);
+    expect(liveText(test.internal)).toBe(before);
+    expect(
+      test.store.savedParts.some((part) => part.type === "compaction" && part.compactBoundary),
+    ).toBe(false);
+  });
+
+  it("recursively folds persisted summaries and keeps the same hierarchy after cold recovery", async () => {
+    const test = await fixture();
+    await test.invoke("ranges");
+    let previousBoundary: string | undefined;
+    for (let level = 1; level <= 8; level++) {
+      const summary = test.internal.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .find((entry) => entry.metadata?.compactBoundary);
+      expect(summary?.metadata?.compactHierarchy?.level).toBe(level);
+      expect(summary?.metadata?.compactHierarchy?.originalMessageCount).toBe(1);
+      expect(summary?.messageId).toBeTruthy();
+      if (previousBoundary)
+        expect(summary?.metadata?.compactHierarchy?.childBoundaryIds).toEqual([previousBoundary]);
+      previousBoundary = summary!.metadata!.compactBoundary!.boundaryId;
+      if (level < 8) {
+        const id = summary!.messageId!;
+        const result = await test.internal.compactActiveConversation(
+          undefined,
+          createRootTraceContext({ sessionId: test.sessionId }),
+          [],
+          {
+            trigger: CompactTrigger.Manual,
+            ranges: [{ startMessageId: id, endMessageId: id }],
+          },
+        );
+        expect(result.outcome).toBe("compacted");
+      }
+    }
+    const resumed = test.createRuntime();
+    await resumed.resumeFromStore();
+    const restored = (resumed as unknown as AgentRuntimeInternal).messageHistory
+      .borrowReadOnlyRuntimeEntries()
+      .filter((entry) => entry.metadata?.compactBoundary);
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.metadata?.compactHierarchy?.level).toBe(8);
+    expect(restored[0]?.metadata?.compactBoundary?.boundaryId).toBe(previousBoundary);
+    expect(liveText(resumed as unknown as AgentRuntimeInternal)).not.toContain(oldRequest);
+    expect(test.summaryCount()).toBe(8);
+  });
+});

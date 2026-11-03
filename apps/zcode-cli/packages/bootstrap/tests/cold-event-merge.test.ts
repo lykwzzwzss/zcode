@@ -1402,6 +1402,95 @@ describe("cold conversation three-source merge", () => {
     expect(hookRows.map((row) => row.turnId)).not.toContain("runtime-turn-compact");
   });
 
+  it("range 多区间 compact 的 operation 级事件按最后一段匹配 durable boundary", () => {
+    // ranges-v1：同一 operationId 的 N 条 durable part 各自带 boundary；内存
+    // CompactCompleted 携带最后一段的 boundaryId。冷合并按「operationId + boundary」
+    // 逐段键命中并抑制这条内存事件，只保留 transcript 合成的一条 operation 级
+    // Completed（tailStart 取最后一段）。
+    const operationId = "compact-operation-ranges";
+    const boundaryOf = (boundaryId: string) => ({
+      boundaryId,
+      trigger: "manual" as const,
+      preCompactTokenCount: 1,
+      summarizedMessageCount: 2,
+      summaryMessageIds: [`summary-${boundaryId}`] as never,
+      traceId: `trace-${boundaryId}` as never,
+    });
+    const compactHost = assistantMessage(
+      "a-compact-ranges",
+      "u-range-2",
+      "",
+      1_200,
+      "turn-ranges",
+    );
+    compactHost.parts = [
+      {
+        id: "compact-ranges-timeline" as never,
+        sessionID: "s1" as never,
+        messageID: "a-compact-ranges" as never,
+        type: "timeline",
+        timelineType: "context_compaction",
+        display: "separator",
+        status: "completed",
+        operationId,
+        trigger: "manual" as const,
+        boundaryId: "boundary-2",
+        summaryMessageId: "summary-2" as never,
+      },
+      ...[1, 2].map((index) => ({
+        id: `compact-range-${index}` as never,
+        sessionID: "s1" as never,
+        messageID: "a-compact-ranges" as never,
+        type: "compaction" as const,
+        auto: false,
+        operationId,
+        tail_start_id: `u-range-${index}` as never,
+        compactBoundary: boundaryOf(`boundary-${index}`),
+      })),
+    ];
+    const memoryCompleted = event(
+      1,
+      SessionEventType.CompactCompleted,
+      {
+        operationId,
+        messageId: "a-compact-ranges",
+        status: "completed",
+        trigger: "manual",
+        display: "separator",
+        boundaryId: "boundary-2",
+        summaryMessageId: "summary-2",
+        tailStartMessageId: "u-range-2",
+      },
+      "turn-ranges",
+    );
+
+    const merged = mergeColdConversationEvents({
+      memoryEvents: [memoryCompleted],
+      messages: [
+        userMessage("u-range-1", "covered segment 1", 1_000, "turn-ranges"),
+        userMessage("u-range-2", "covered segment 2", 1_100, "turn-ranges"),
+        compactHost,
+      ],
+      sessionId: "s1",
+    });
+
+    const completed = merged.events.filter(
+      (item) => item.type === SessionEventType.CompactCompleted,
+    );
+    expect(completed).toHaveLength(1);
+    expect(completed[0]?.payload).toMatchObject({
+      operationId,
+      boundaryId: "boundary-2",
+      summaryMessageId: "summary-2",
+      tailStartMessageId: "u-range-2",
+    });
+    expect(merged.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "cold_merge.durable_event_suppressed" }),
+      ]),
+    );
+  });
+
   it("treats SessionInputPromoted as a known queue terminal during cold merge", () => {
     const queued = event(
       1,

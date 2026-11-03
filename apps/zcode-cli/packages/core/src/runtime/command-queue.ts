@@ -121,6 +121,7 @@ export interface RuntimeCommandQueue {
   dequeue(): RuntimeCommand | undefined;
   dequeueNextBatch(): readonly RuntimeCommand[];
   enqueue(command: RuntimeCommand): void;
+  restoreFront(commands: readonly RuntimeCommand[]): void;
   getByMaxPriority(maxPriority: RuntimeCommandPriority): readonly RuntimeCommand[];
   hasPending(): boolean;
   markCancelPending(id: RuntimeCommandId): void;
@@ -212,6 +213,10 @@ export function createRuntimeCommandQueue(): RuntimeCommandQueue {
 
     enqueue(command: RuntimeCommand): void {
       commands.push(command);
+    },
+
+    restoreFront(restored: readonly RuntimeCommand[]): void {
+      commands.unshift(...restored);
     },
 
     getByMaxPriority(maxPriority: RuntimeCommandPriority): readonly RuntimeCommand[] {

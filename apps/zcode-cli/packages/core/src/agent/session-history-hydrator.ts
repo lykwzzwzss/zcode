@@ -51,13 +51,14 @@ import {
   systemReminderAttachmentEntry,
   systemReminderRuntimeMetadata,
   todoReminderRuntimeMetadata,
+  withMessageId,
   type MessageHistory,
   type RuntimeMessageEntry,
   type RuntimeMessageMetadata,
   type RuntimeMessageSource,
   type ToolCallInput,
 } from "./message-history.js";
-import { compactActiveSessionMessages, isActiveCompactionBoundaryPart } from "./compact-session.js";
+import { compactSessionMessages, isActiveCompactionBoundaryPart } from "./compact-session.js";
 import { filePartToContentBlock, projectPersistedToolMediaContent } from "./file-part-hydration.js";
 import { selectToolPartsForHistory } from "./tool-part-order.js";
 
@@ -82,6 +83,7 @@ export async function hydrateMessageHistoryFromSession(input: {
 }): Promise<SessionHistoryHydrationResult> {
   const activeMessages = activeSessionMessages(input.messages, {
     branchCutAfterMessageId: input.branchCutAfterMessageId,
+    logger: input.logger,
     rewindCreatedMessageId: input.rewindCreatedMessageId,
     rewindKeptMessageIds: input.rewindKeptMessageIds,
     rewindTargetMessageId: input.rewindTargetMessageId,
@@ -128,6 +130,8 @@ export async function hydrateMessageHistoryFromSession(input: {
       // user <system-reminder>，后续 mid-conversation system projection 会失去 attachment source。
       const syntheticAttachment = syntheticSystemReminderAttachmentFromParts(parts);
       if (syntheticAttachment) {
+        // 隐藏提醒也属于这条持久化 user 消息；attachment 没有 messageId 字段，
+        // withMessageId 会无条件跳过它，因此这里不需要再包一层 no-op 调用。
         input.history.addEntries([syntheticAttachment]);
         appliedMessageCount++;
         continue;
@@ -163,17 +167,50 @@ export async function hydrateMessageHistoryFromSession(input: {
             ...legacySyntheticRuntimeMetadata(),
             ...entries[0].metadata,
             compactBoundary,
+            ...(boundaryPart?.type === "compaction" && boundaryPart.metadata?.hierarchy
+              ? { compactHierarchy: boundaryPart.metadata.hierarchy }
+              : {}),
+          },
+        };
+      } else if (message.info.semantics?.kind === "compact_summary" && entries[0]) {
+        const retainedBody = message.info.summary?.body?.trim();
+        const original = input.messages.find(
+          (candidate) =>
+            candidate.info.role === "user" &&
+            candidate.info.summary?.body?.trim() === retainedBody &&
+            candidate.parts.some(isActiveCompactionBoundaryPart),
+        );
+        const originalPart = original?.parts.find(isActiveCompactionBoundaryPart);
+        const originalBoundary =
+          originalPart?.type === "compaction"
+            ? hydrateCompactDiscovery(originalPart.compactBoundary)
+            : undefined;
+        // 增量折叠保留的旧摘要：自身没有 compaction part，但语义上仍是折叠索引。
+        // 不标记的话，重启后的下一次折叠会把它当普通正文再摘要一遍。
+        entries[0] = {
+          ...entries[0],
+          metadata: {
+            ...legacySyntheticRuntimeMetadata(),
+            ...entries[0].metadata,
+            retainedCompactSummary: true,
+            ...(originalBoundary ? { compactBoundary: originalBoundary } : {}),
+            ...(originalPart?.type === "compaction" && originalPart.metadata?.hierarchy
+              ? { compactHierarchy: originalPart.metadata.hierarchy }
+              : {}),
           },
         };
       }
       input.history.addEntries(
-        presentation
-          ? entries.map((entry) =>
-              entry.kind === "attachment"
-                ? entry
-                : { ...entry, metadata: { ...entry.metadata, ...presentation } },
-            )
-          : entries,
+        withMessageId(
+          presentation
+            ? entries.map((entry) =>
+                entry.kind === "attachment"
+                  ? entry
+                  : { ...entry, metadata: { ...entry.metadata, ...presentation } },
+              )
+            : entries,
+          message.info.id,
+        ),
       );
       appliedMessageCount++;
       continue;
@@ -202,29 +239,32 @@ export async function hydrateMessageHistoryFromSession(input: {
     // 这条消息拆出的所有 assistant entry 共用分组键：compact 按数据库消息定持久化边界，两边组数才一致。
     const compactGroupKey = providerRounds.length > 0 ? message.info.id : undefined;
     input.history.addEntries(
-      withCompactGroupKey(
-        providerRounds.flatMap((round) => {
-          const toolPart = round.toolPart;
-          return [
-            createRuntimeAssistantEntry(
-              assistantTextFromParts(round.parts),
-              [{ id: toolPart.callID, input: toolPart.state.input, name: toolPart.tool }],
-              assistantReasoningFromParts(round.parts),
-              assistantModel,
-            ),
-            createRuntimeToolResultEntry(
-              toolPart.callID,
-              toolPart.tool,
-              toolPart.state.status === "completed"
-                ? toolPart.state.output
-                : toolPart.state.status === "error"
-                  ? toolPart.state.error
-                  : INTERRUPTED_TOOL_RESULT,
-              toolPart.state.status === "error",
-            ),
-          ];
-        }),
-        compactGroupKey,
+      withMessageId(
+        withCompactGroupKey(
+          providerRounds.flatMap((round) => {
+            const toolPart = round.toolPart;
+            return [
+              createRuntimeAssistantEntry(
+                assistantTextFromParts(round.parts),
+                [{ id: toolPart.callID, input: toolPart.state.input, name: toolPart.tool }],
+                assistantReasoningFromParts(round.parts),
+                assistantModel,
+              ),
+              createRuntimeToolResultEntry(
+                toolPart.callID,
+                toolPart.tool,
+                toolPart.state.status === "completed"
+                  ? toolPart.state.output
+                  : toolPart.state.status === "error"
+                    ? toolPart.state.error
+                    : INTERRUPTED_TOOL_RESULT,
+                toolPart.state.status === "error",
+              ),
+            ];
+          }),
+          compactGroupKey,
+        ),
+        message.info.id,
       ),
     );
 
@@ -255,17 +295,20 @@ export async function hydrateMessageHistoryFromSession(input: {
       }),
     );
     input.history.addEntries(
-      withCompactGroupKey(
-        [
-          createRuntimeAssistantEntry(
-            text,
-            finalToolCalls,
-            reasoning,
-            assistantModel,
-            contextUsage,
-          ),
-        ],
-        compactGroupKey,
+      withMessageId(
+        withCompactGroupKey(
+          [
+            createRuntimeAssistantEntry(
+              text,
+              finalToolCalls,
+              reasoning,
+              assistantModel,
+              contextUsage,
+            ),
+          ],
+          compactGroupKey,
+        ),
+        message.info.id,
       ),
     );
     appliedMessageCount++;
@@ -296,7 +339,14 @@ export async function hydrateMessageHistoryFromSession(input: {
           hydrateToolSearchContent(part.state.metadata?.modelContent, input.logger) ??
           projectedMediaContent ??
           part.state.output;
-        input.history.addToolResult(part.callID, toolName, content, true, false, modelCallWrapper);
+        // addToolResult 没有 messageId 参数；工具结果在库里是这条 assistant 消息的 part，
+        // 显式走 addEntries + withMessageId，冷恢复后索引仍能定位到同一条消息。
+        input.history.addEntries(
+          withMessageId(
+            [createRuntimeToolResultEntry(part.callID, toolName, content, false, modelCallWrapper)],
+            message.info.id,
+          ),
+        );
         continue;
       }
 
@@ -304,25 +354,39 @@ export async function hydrateMessageHistoryFromSession(input: {
         const persistedModelContent = part.state.metadata?.modelContent;
         // 实时链路使用 ToolExecutionResult.modelContent，但旧恢复逻辑只重放
         // 面向 UI / 日志的 state.error；优先使用持久化字符串并兼容旧 session。
-        input.history.addToolResult(
-          part.callID,
-          toolName,
-          typeof persistedModelContent === "string" ? persistedModelContent : part.state.error,
-          false,
-          true,
-          modelCallWrapper,
+        input.history.addEntries(
+          withMessageId(
+            [
+              createRuntimeToolResultEntry(
+                part.callID,
+                toolName,
+                typeof persistedModelContent === "string"
+                  ? persistedModelContent
+                  : part.state.error,
+                true,
+                modelCallWrapper,
+              ),
+            ],
+            message.info.id,
+          ),
         );
         continue;
       }
 
       interruptedToolCount++;
-      input.history.addToolResult(
-        part.callID,
-        toolName,
-        INTERRUPTED_TOOL_RESULT,
-        false,
-        true,
-        modelCallWrapper,
+      input.history.addEntries(
+        withMessageId(
+          [
+            createRuntimeToolResultEntry(
+              part.callID,
+              toolName,
+              INTERRUPTED_TOOL_RESULT,
+              true,
+              modelCallWrapper,
+            ),
+          ],
+          message.info.id,
+        ),
       );
     }
   }
@@ -340,6 +404,7 @@ export function activeSessionMessages(
   options: {
     branchCutAfterMessageId?: MessageId;
     includeCompactPreservedSegment?: boolean;
+    logger?: Logger;
     rewindCreatedMessageId?: MessageId;
     rewindKeptMessageIds?: readonly MessageId[];
     rewindTargetMessageId?: MessageId;
@@ -357,11 +422,10 @@ export function activeSessionMessages(
     }
     const compactActiveMessages =
       legacyCompactIndex >= 0
-        ? compactActiveSessionMessages(
-            messages,
-            legacyCompactIndex,
-            options.includeCompactPreservedSegment !== false,
-          )
+        ? compactSessionMessages(messages, {
+            includePreservedSegment: options.includeCompactPreservedSegment !== false,
+            logger: options.logger,
+          })
         : messages;
     if (options.rewindKeptMessageIds && legacyCompactIndex >= 0) {
       const postCompactIds = new Set(
@@ -384,11 +448,10 @@ export function activeSessionMessages(
     }
   }
   return lastCompactionIndex >= 0
-    ? compactActiveSessionMessages(
-        branchActiveMessages,
-        lastCompactionIndex,
-        options.includeCompactPreservedSegment !== false,
-      )
+    ? compactSessionMessages(branchActiveMessages, {
+        includePreservedSegment: options.includeCompactPreservedSegment !== false,
+        logger: options.logger,
+      })
     : branchActiveMessages;
 }
 

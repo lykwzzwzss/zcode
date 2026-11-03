@@ -253,7 +253,12 @@ export function evaluateRewindTarget<T extends { id: string }>(
   }
 
   const checkpointAvailable = input.checkpointAvailable === true;
-  const coveredByCompact = boundaryIndex >= 0 && targetIndex < boundaryIndex;
+  const coveredByCompact = isTargetCoveredByCompact({
+    boundaryIndex,
+    getId,
+    items: input.items,
+    targetIndex,
+  });
 
   if (!coveredByCompact) {
     const allowedScopes = activeChainAllowedScopes(checkpointAvailable);
@@ -329,6 +334,46 @@ function activeChainAllowedScopes(checkpointAvailable: boolean): RewindScope[] {
   return checkpointAvailable
     ? [RewindScope.Conversation, RewindScope.Workspace, RewindScope.Both]
     : [RewindScope.Conversation];
+}
+
+/**
+ * 目标消息是否已被折叠覆盖。
+ * legacy 前缀折叠仍按「最后一个 boundary 之前」判定；ranges-v1 记录只覆盖自己显式声明的
+ * [startMessageId..endMessageId]，区间之外的 gap / 未选前缀仍是活跃消息，不能误判成 covered。
+ * 若最新一条折叠是 legacy（它会把此前一切重新折进自己的摘要），继续沿用旧判定。
+ */
+function isTargetCoveredByCompact<T extends { id: string }>(input: {
+  boundaryIndex: number;
+  getId: (item: T) => string;
+  items: readonly T[];
+  targetIndex: number;
+}): boolean {
+  const { boundaryIndex, getId, items, targetIndex } = input;
+  if (boundaryIndex < 0) return false;
+  const rangeItems = items.flatMap((item, index) => {
+    const compactRange = (item as unknown as { compactRange?: { endMessageId: string; startMessageId: string } })
+      .compactRange;
+    return compactRange ? [{ compactRange, index }] : [];
+  });
+  if (rangeItems.length === 0) return targetIndex < boundaryIndex;
+  const lastLegacyIndex = items.findLastIndex(
+    (item) =>
+      (item as unknown as { compactBoundary?: unknown }).compactBoundary !== undefined &&
+      (item as unknown as { compactRange?: unknown }).compactRange === undefined,
+  );
+  // 最新折叠是 legacy：它仍然覆盖 boundary 之前的全部内容（含更早的 range 摘要）。
+  if (lastLegacyIndex === boundaryIndex) return targetIndex < boundaryIndex;
+  // 更早的 legacy 边界仍然折掉了它之前的全部内容。
+  if (lastLegacyIndex >= 0 && targetIndex < lastLegacyIndex) return true;
+  const indexById = new Map(items.map((item, index) => [getId(item), index] as const));
+  for (const { compactRange } of rangeItems) {
+    const start = indexById.get(compactRange.startMessageId);
+    const end = indexById.get(compactRange.endMessageId);
+    if (start !== undefined && end !== undefined && targetIndex >= start && targetIndex <= end) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isRequestedScopeAllowed(

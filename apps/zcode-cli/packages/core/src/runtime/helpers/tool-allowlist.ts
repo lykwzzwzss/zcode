@@ -1,5 +1,6 @@
 import {
   AMEND_WORKFLOW_TOOL_NAME,
+  COMPACT_NOW_TOOL_NAME,
   CREATE_WORKFLOW_TOOL_NAME,
   FILL_WORKFLOW_HOLE_TOOL_NAME,
   GET_WORKFLOW_RUN_TOOL_NAME,
@@ -54,6 +55,15 @@ const WORKFLOW_CHILD_DISALLOWED_TOOLS = [
 ] as const;
 
 /**
+ * subagent_child 运行时结构性禁用的工具。
+ *
+ * CompactNow 在子代理里没有压缩控制端口（`helpers/runtime-tools.ts` 只为非 subagent
+ * runtime 注入），注册了也只会返回 `port_unavailable`。子代理的上下文本来就短，自动折叠
+ * 足够兜底，不向模型暴露一个必然失败的工具。
+ */
+const SUBAGENT_CHILD_DISALLOWED_TOOLS = [COMPACT_NOW_TOOL_NAME] as const;
+
+/**
  * 子 runtime 不注册的 run 内省工具。
  *
  * 根因与上面那份名单不同：它们只读、无 gate，但要经 dwf run 端口读取，而端口只在 app 顶层
@@ -81,6 +91,7 @@ export function resolveRuntimeDisallowedTools(
 ): readonly string[] | undefined {
   const structural = [
     ...(config.taskType === "workflow_child" ? WORKFLOW_CHILD_DISALLOWED_TOOLS : []),
+    ...(config.taskType === "subagent_child" ? SUBAGENT_CHILD_DISALLOWED_TOOLS : []),
     ...(config.taskType !== undefined && CHILD_TASK_TYPES_WITHOUT_RUN_PORT.has(config.taskType)
       ? RUN_INTROSPECTION_TOOLS
       : []),
